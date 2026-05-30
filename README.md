@@ -1,8 +1,8 @@
 # 轻量离线关键词识别 / 唤醒词识别 / KWS
 
-> **Offline · < 1MB · < 10ms inference · No cloud · No data upload**
+> 关键词识别、唤醒词识别、离线语音识别、Keyword Spotting、Wake Word、KWS、ONNX、TFLite、ESP32
 
-[中文说明](README_ZH.md)
+**Offline · < 1MB · < 10ms inference · No cloud · No data upload** | [中文说明](README_ZH.md)
 
 ONNX is a universal model format. Grab the mel + embedding + classifier ONNX files and run wake word detection on **any device** with ONNX Runtime — Android, Linux, Web. TFLite for ESP32. No internet, no cloud dependency.
 
