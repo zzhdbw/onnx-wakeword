@@ -146,7 +146,8 @@ public class MainActivity extends AppCompatActivity {
                     }
                     toggleButton.setEnabled(true);
                 } else {
-                    statusText.setText("模型加载失败");
+                    String err = engine.getErrorMessage();
+                    statusText.setText(err != null ? "错误: " + err : "模型加载失败——请检查 assets 目录是否放入了模型文件");
                 }
             });
         }).start();

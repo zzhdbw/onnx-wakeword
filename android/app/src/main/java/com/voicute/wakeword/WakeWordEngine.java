@@ -101,6 +101,7 @@ public class WakeWordEngine {
     private OrtSession embSession;
 
     private boolean loaded;
+    private String errorMessage = null;
     private int debugLogCount = 0;
     private static final int DEBUG_LOG_MAX = 3;
 
@@ -188,7 +189,8 @@ public class WakeWordEngine {
             loaded = true;
             Log.i(TAG, "All " + models.size() + " models loaded");
         } catch (Exception e) {
-            Log.e(TAG, "Failed to load models", e);
+            Log.e(TAG, "Failed to load models — check assets/ for model_info.json + .onnx files", e);
+            errorMessage = e.getMessage();
             loaded = false;
         }
     }
@@ -211,6 +213,7 @@ public class WakeWordEngine {
     }
 
     public boolean isLoaded() { return loaded; }
+    public String getErrorMessage() { return errorMessage; }
 
     /**
      * Run inference on raw 16-bit PCM audio.

@@ -86,6 +86,7 @@
   <div class="log-box" id="logBox"></div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
 <script src="wakeword.js"></script>
 <script>
 // ---- State ----
@@ -107,11 +108,12 @@ const logBox = document.getElementById('logBox');
 // ---- Init ----
 (async () => {
   try {
+    statusText.textContent = '正在加载 ONNX Runtime...';
     detector = createDetector();
     await detector.loadModels(
-      'model_info.json',
-      'melspectrogram.onnx',
-      'embedding_model.onnx'
+      '../models/model_info.json',
+      '../models/melspectrogram.onnx',
+      '../models/embedding_model.onnx'
     );
     gate = createConfidenceGate({ relativeRatio: 3.0, absoluteThreshold: 0.5, cooldownMs: 3500 });
     btnToggle.disabled = false;

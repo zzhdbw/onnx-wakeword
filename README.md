@@ -107,13 +107,9 @@ DetectionResult result = engine.process(audioChunk);
 
 ### Web
 
-将模型文件复制到 `web/` 目录，双击 `run.bat` 或运行：
+双击项目根目录的 `run.bat`，浏览器打开 `http://localhost:8080/web/`。
 
-```bash
-cd web && python -m http.server 8080
-```
-
-浏览器打开 `http://localhost:8080` 即可体验。
+或手动：`python -m http.server 8080`，无需复制模型文件。
 
 ### Linux
 

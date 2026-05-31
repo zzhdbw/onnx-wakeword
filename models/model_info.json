@@ -1,25 +1,7 @@
 {
-  "multi_model": true,
-  "models": [
-    {
-      "wake_word": "曼波",
-      "model_file": "manbo_v8_wakeword.onnx",
-      "emb_frames": 16
-    },
-    {
-      "wake_word": "你好电脑",
-      "model_file": "nihaodiannao_v8_wakeword.onnx",
-      "emb_frames": 16
-    },
-    {
-      "wake_word": "开始播放",
-      "model_file": "kaishibofang_v8_wakeword.onnx",
-      "emb_frames": 16
-    },
-    {
-      "wake_word": "来福",
-      "model_file": "laifu_v8_wakeword.onnx",
-      "emb_frames": 16
-    }
-  ]
+  "multi_model": false,
+  "wake_word": "你好电脑",
+  "model_file": "nihaodiannao_v8_wakeword.onnx",
+  "emb_frames": 16,
+  "threshold": 0.5
 }

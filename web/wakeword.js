@@ -4,6 +4,8 @@
  * Matches Android WakeWordEngine logic:
  *   Audio → Mel → Embedding → N classifiers → sigmoid → logit → softmax → trigger
  */
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+
 const SAMPLE_RATE = 16000;
 const MEL_HOP_SAMPLES = 160;
 const MEL_WIN_SAMPLES = 400;
@@ -30,12 +32,15 @@ async function loadModels(modelInfoUrl, melUrl, embUrl) {
     melSession = await loadModel(melUrl);
     embSession = await loadModel(embUrl);
 
+    // Base path for model files relative to model_info.json
+    const basePath = modelInfoUrl.substring(0, modelInfoUrl.lastIndexOf('/') + 1);
+
     const infoResp = await fetch(modelInfoUrl);
     const info = await infoResp.json();
 
     if (info.multi_model && info.models) {
         for (const m of info.models) {
-            const session = await loadModel(m.model_file);
+            const session = await loadModel(basePath + m.model_file);
             models.push({ name: m.wake_word, session, embFrames: m.emb_frames });
             if (m.emb_frames > maxEmbFrames) maxEmbFrames = m.emb_frames;
         }
