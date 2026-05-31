@@ -107,11 +107,13 @@ DetectionResult result = engine.process(audioChunk);
 
 ### Web
 
-```javascript
-import { init, detect } from './web/wakeword.js';
-await init('/models/');
-const result = detect(audioSamples);
+将模型文件复制到 `web/` 目录，双击 `run.bat` 或运行：
+
+```bash
+cd web && python -m http.server 8080
 ```
+
+浏览器打开 `http://localhost:8080` 即可体验。
 
 ### Linux
 

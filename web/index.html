@@ -109,9 +109,9 @@ const logBox = document.getElementById('logBox');
   try {
     detector = createDetector();
     await detector.loadModels(
-      '../models/model_info.json',
-      '../models/melspectrogram.onnx',
-      '../models/embedding_model.onnx'
+      'model_info.json',
+      'melspectrogram.onnx',
+      'embedding_model.onnx'
     );
     gate = createConfidenceGate({ relativeRatio: 3.0, absoluteThreshold: 0.5, cooldownMs: 3500 });
     btnToggle.disabled = false;
