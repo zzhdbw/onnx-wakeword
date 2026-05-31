@@ -92,7 +92,8 @@ ONNX 是通用模型格式。拿到 mel + embedding + classifier 三个 ONNX 文
 |------|------|:---:|
 | [`android/`](android/) | Android (Java) | ✅ |
 | [`web/`](web/) | Web (JavaScript) | ✅ |
-| [`linux/`](linux/) | Linux (Python) | ✅ |
+| [`linux/`](linux/) | Linux x86_64 / arm64 (Python, ONNX) | ✅ |
+| [`linux/`](linux/) | 树莓派 32 位 (Python, TFLite) | ✅ |
 | [`esp32/`](esp32/) | ESP32-S3/P4 | 🚧 |
 
 ### Android

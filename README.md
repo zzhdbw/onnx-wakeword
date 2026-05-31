@@ -92,7 +92,8 @@ Multi-model: each classifier sigmoid → logit → +background class → softmax
 |-----------|----------|:------:|
 | [`android/`](android/) | Android (Java) | ✅ |
 | [`web/`](web/) | Web (JavaScript) | ✅ |
-| [`linux/`](linux/) | Linux (Python) | ✅ |
+| [`linux/`](linux/) | Linux x86_64 / arm64 (Python, ONNX) | ✅ |
+| [`linux/`](linux/) | Raspberry Pi 32-bit (Python, TFLite) | ✅ |
 | [`esp32/`](esp32/) | ESP32-S3/P4 | 🚧 TFLite |
 
 ### Android
