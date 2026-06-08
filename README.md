@@ -1,8 +1,11 @@
-# 轻量离线关键词识别 / 唤醒词
+# 轻量离线关键词识别 / 唤醒词 / 语音唤醒
+
+
+`唤醒词` · `关键词识别` · `语音唤醒` · `自定义唤醒词` · `离线语音识别` · `KWS` · `Keyword Spotting` · `Wake Word` · `ONNX` · `端侧推理` · `ESP32` · `Android` · `开源`
 
 > **离线运行 · 模型 < 130KB · 不上传音频 · ESP32/Android/Linux/Web 全平台**
 
-本仓库提供各平台的 ONNX 唤醒词推理代码。拿到 ONNX 模型和配置文件，就能在 Android、Web、Linux、ESP32 上跑关键词识别。
+本仓库提供各平台的开源唤醒词/关键词识别推理代码。支持自定义唤醒词，拿到 ONNX 模型就能在 Android、Web、Linux、ESP32 上跑离线语音识别和语音唤醒，不依赖云端。
 
 ## Web Demo
 
