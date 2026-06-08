@@ -1,0 +1,10 @@
+{
+  "model_type": "dscnn",
+  "mel_time": 98,
+  "multi_model": true,
+  "models": [
+    {"wake_word": "曼波", "model_file": "dscnn_multiscale_manbo.onnx", "emb_frames": 1, "cons_frames": 3},
+    {"wake_word": "你好电脑", "model_file": "dscnn_multiscale_nihaodiannao.onnx", "emb_frames": 1, "cons_frames": 3},
+    {"wake_word": "打开灯光", "model_file": "dscnn_multiscale_dakaidengguang.onnx", "emb_frames": 1, "cons_frames": 3}
+  ]
+}

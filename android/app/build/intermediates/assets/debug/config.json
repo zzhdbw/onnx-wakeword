@@ -1,0 +1,13 @@
+{
+  "wake_word": "打开灯光",
+  "arch": "causal-ds-tcn",
+  "params": 23281,
+  "val_accuracy": 0.9029,
+  "mel_config": {
+    "n_mels": 32,
+    "mel_time": 98
+  },
+  "model_size": {
+    "onnx_kb": 102.7
+  }
+}

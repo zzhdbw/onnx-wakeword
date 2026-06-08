@@ -1,0 +1,19 @@
+R_DEF: Internal format may change without notice
+local
+id clearButton
+id counterText
+id detectText
+id l5CheckBox
+id l5RatioSeekBar
+id l5RatioText
+id logContainer
+id logScrollView
+id scoreText
+id statusText
+id thresholdSeekBar
+id thresholdText
+id toggleButton
+id wakeWordSubtitle
+layout activity_main
+string app_name
+style Theme.Voicute

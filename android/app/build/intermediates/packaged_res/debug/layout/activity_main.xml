@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#1a1a2e">
+
+    <!-- Title -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Voicute"
+        android:textSize="28sp"
+        android:textColor="#e94560"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp"
+        android:layout_marginBottom="4dp"
+        android:layout_gravity="center_horizontal" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:id="@+id/wakeWordSubtitle"
+        android:text="唤醒词: 哈基米"
+        android:textSize="14sp"
+        android:textColor="#0f3460"
+        android:layout_marginBottom="16dp"
+        android:layout_gravity="center_horizontal" />
+
+    <!-- Status + Score area -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="4dp">
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="正在加载模型..."
+            android:textSize="13sp"
+            android:textColor="#a0a0b0" />
+
+        <TextView
+            android:id="@+id/scoreText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="13sp"
+            android:textColor="#16c79a" />
+    </LinearLayout>
+
+    <!-- Detection flash -->
+    <TextView
+        android:id="@+id/detectText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="18sp"
+        android:textColor="#ff6b6b"
+        android:textStyle="bold"
+        android:alpha="0"
+        android:gravity="center"
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:id="@+id/counterText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="12sp"
+        android:textColor="#ffd93d"
+        android:layout_marginBottom="4dp"
+        android:layout_gravity="center_horizontal" />
+
+    <!-- Threshold slider -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="2dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp">
+
+        <TextView
+            android:layout_width="40dp"
+            android:layout_height="wrap_content"
+            android:text="阈值"
+            android:textSize="12sp"
+            android:textColor="#a0a0b0" />
+
+        <SeekBar
+            android:id="@+id/thresholdSeekBar"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:max="95"
+            android:progress="50"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="8dp" />
+
+        <TextView
+            android:id="@+id/thresholdText"
+            android:layout_width="36dp"
+            android:layout_height="wrap_content"
+            android:text="50%"
+            android:textSize="12sp"
+            android:textColor="#ffd93d"
+            android:gravity="end" />
+    </LinearLayout>
+
+    <!-- L5 silence gate toggle -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginBottom="8dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:background="#0a0a1a"
+        android:padding="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🔇 前后静音检测"
+                android:textSize="13sp"
+                android:textColor="#e0e0e0"
+                android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/l5CheckBox"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:buttonTint="#16c79a" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="检测能量跃迁(真人) vs 持续噪声(视频)。识别延迟 ~700ms。"
+            android:textSize="10sp"
+            android:textColor="#888899"
+            android:layout_marginTop="2dp" />
+
+        <!-- L5 jump ratio slider -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="4dp">
+
+            <TextView
+                android:layout_width="36dp"
+                android:layout_height="wrap_content"
+                android:text="灵敏度"
+                android:textSize="10sp"
+                android:textColor="#888899" />
+
+            <SeekBar
+                android:id="@+id/l5RatioSeekBar"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="30"
+                android:progress="10"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp" />
+
+            <TextView
+                android:id="@+id/l5RatioText"
+                android:layout_width="36dp"
+                android:layout_height="wrap_content"
+                android:text="3.0x"
+                android:textSize="10sp"
+                android:textColor="#ffd93d"
+                android:gravity="end" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="低=远场轻声也触发 | 高=近处大声才触发"
+            android:textSize="9sp"
+            android:textColor="#444455"
+            android:layout_marginTop="1dp" />
+    </LinearLayout>
+
+    <!-- Detection log header -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:background="#16213e">
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="识别记录"
+            android:textSize="12sp"
+            android:textColor="#e0e0e0"
+            android:textStyle="bold" />
+        <Button
+            android:id="@+id/clearButton"
+            android:layout_width="56dp"
+            android:layout_height="32dp"
+            android:text="清除"
+            android:textSize="11sp"
+            android:textColor="#ffffff"
+            android:backgroundTint="#444466"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:layout_marginRight="4dp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="时间"
+            android:textSize="10sp"
+            android:textColor="#888"
+            android:layout_marginRight="8dp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="得分"
+            android:textSize="10sp"
+            android:textColor="#888"
+            android:layout_marginRight="4dp" />
+    </LinearLayout>
+
+    <!-- Scrollable detection log -->
+    <ScrollView
+        android:id="@+id/logScrollView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="#0f0f23"
+        android:padding="4dp">
+
+        <LinearLayout
+            android:id="@+id/logContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </ScrollView>
+
+    <!-- Start/Stop button -->
+    <Button
+        android:id="@+id/toggleButton"
+        android:layout_width="200dp"
+        android:layout_height="50dp"
+        android:text="开始"
+        android:textSize="16sp"
+        android:textColor="#ffffff"
+        android:backgroundTint="#e94560"
+        android:layout_marginTop="8dp"
+        android:layout_gravity="center_horizontal" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Powered by NanoWakeWord + ONNX Runtime"
+        android:textSize="10sp"
+        android:textColor="#555566"
+        android:layout_marginTop="4dp"
+        android:layout_gravity="center_horizontal" />
+
+</LinearLayout>

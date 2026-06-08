@@ -1,44 +1,44 @@
-# Lightweight Offline Wake Word / Keyword Spotting
+# 轻量离线关键词识别 / 唤醒词
 
-> **Offline · Model < 130KB · No cloud · No audio upload · ESP32/Android/Linux/Web**
+> **离线运行 · 模型 < 130KB · 不上传音频 · ESP32/Android/Linux/Web 全平台**
 
-[中文说明](README_ZH.md)
-
-Plug in ONNX models and run wake word detection on any device with ONNX Runtime. No internet, no cloud dependency.
-
-Use cases: smart home voice control, AI toys, desktop assistants, ESP32 offline voice modules.
+本仓库提供各平台的 ONNX 唤醒词推理代码。拿到 ONNX 模型和配置文件，就能在 Android、Web、Linux、ESP32 上跑关键词识别。
 
 ## Web Demo
 
-![Screenshot](web/screenshot.png)
+![网页截图](web/screenshot.png)
 
-Built-in anti-false-trigger panel with 5-layer detection toggles, L5 ratio slider, threshold control, and confidence bar.
+内置**防误唤醒设置面板**（5 层检测开关 + L5 倍率滑块 + 阈值调节 + 置信度进度条）。
 
-## Get ONNX Models
+## 获取 ONNX 模型
 
-### Train your own
+你可以自己训练，也可以使用在线服务生成。
 
-All of these can export ONNX wake word models:
+### 自己训练
 
-- [OpenWakeWord](https://github.com/dscripka/openWakeWord) — open source, home automation, multi-wake-word
-- [MicroWakeWord](https://github.com/kahrendt/microWakeWord) — designed for ESP32, TinyML
-- [NanoWakeWord](https://github.com/arcosoph/nanowakeword) — 11 architectures, tiny (40KB)
-- Any KWS framework that exports ONNX
+以下工具都能导出 ONNX 唤醒词模型：
 
-### Quick start (no training)
+- [OpenWakeWord](https://github.com/dscripka/openWakeWord) — 开源，家居场景，支持多唤醒词
+- [MicroWakeWord](https://github.com/kahrendt/microWakeWord) — 专为 ESP32 等 MCU 设计
+- [NanoWakeWord](https://github.com/arcosoph/nanowakeword) — 11 种架构可选，模型极小(40KB)
+- 任何能导出 ONNX 的 KWS 训练框架均可
 
-[voicute.com](https://www.voicute.com) — enter a wake word, get an ONNX model. First one free.
+### 在线生成
 
-## Required Files
+[voicute.com](https://www.voicute.com) 输入中文唤醒词，自动生成 ONNX 模型。首次免费。
 
-| File | Description |
-|------|-------------|
-| `melspectrogram.onnx` | Audio → Mel spectrogram (shared). **Provided in `models/`** |
-| `your_model.onnx` | Wake word detection. Get from training or online service |
+## 模型文件
 
-Plus a `model_info.json` config file.
+无论用哪个工具训练，最终需要两个文件：
 
-## Model Config
+| 文件 | 说明 |
+|------|------|
+| `melspectrogram.onnx` | 音频 → 梅尔频谱，通用模块，**本仓库已提供** |
+| `你的模型.onnx` | 唤醒词推理模型，训练或在线生成获取 |
+
+外加一个 `model_info.json` 描述模型配置。
+
+## 模型配置
 
 ```json
 {
@@ -51,21 +51,35 @@ Plus a `model_info.json` config file.
 }
 ```
 
-## Project Structure
+多个唤醒词：
+
+```json
+{
+  "model_type": "dscnn",
+  "mel_time": 98,
+  "multi_model": true,
+  "models": [
+    {"wake_word": "打开灯光", "model_file": "dakaidengguang.onnx", "cons_frames": 3},
+    {"wake_word": "你好电脑", "model_file": "nihaodiannao.onnx", "cons_frames": 3}
+  ]
+}
+```
+
+## 文件结构
 
 ```
 onnx-wakeword/
 ├── android/     # Android (Java, ONNX Runtime)
 ├── web/         # Web (JavaScript, ONNX Runtime Web)
-├── linux/       # Linux / Raspberry Pi (Python)
+├── linux/       # Linux / 树莓派 (Python)
 ├── esp32/       # ESP32-S3/P4
-└── models/      # Shared mel model + demo wake word models
+└── models/      # 测试用模型和配置（不提交 git）
 ```
 
-## Platform Quick Start
+## 各平台调用
 
-| Platform | Directory | Entry Point |
-|----------|-----------|-------------|
+| 平台 | 目录 | SDK 入口 |
+|------|------|------|
 | Android | `android/` | `WakeWordEngine.java` |
 | Web | `web/` | `wakeword.js` → `VoicuteWakeWord.create()` |
 | Linux | `linux/` | `wakeword_engine.py` → `WakeWordEngine()` |
@@ -73,14 +87,15 @@ onnx-wakeword/
 ### Web
 
 ```html
+<script src="onnxruntime-web/ort.min.js"></script>
 <script src="wakeword.js"></script>
 <script>
   const engine = VoicuteWakeWord.create();
+  // 支持本地路径、网络 URL、ZIP 包
   await engine.load('model_info.json', 'melspectrogram.onnx');
-  // Supports local paths, URLs, and COS ZIP packages
   engine.set_L1(true);
   await engine.start((word, prob) => {
-    console.log(`Detected: ${word} (${(prob*100).toFixed(0)}%)`);
+    console.log(`检测到: ${word} (${(prob*100).toFixed(0)}%)`);
   });
 </script>
 ```
@@ -101,34 +116,34 @@ engine.start(lambda word, prob, info: print(f'{word}'))
 
 ### Android
 
-Copy models to `assets/`, build with Android Studio.
+复制模型到 `assets/`，编译运行。
 
 ```java
 WakeWordEngine engine = new WakeWordEngine(context);
 DetectionResult result = engine.process(audioChunk);
 ```
 
-## Anti-False-Trigger Layers
+## 防误触发检测层
 
-5 configurable layers. Enable all for production:
+5 层可独立开关，生产环境建议全部开启：
 
-| Layer | Default | What it prevents |
+| 开关 | 默认 | 解决什么问题 |
 |:---:|:---:|------|
-| L1 Consecutive | on / 2~3 frames | Keyboard clicks, chair creaks (transient noise) |
-| L2 Peak/BG | off | Model hallucination on quiet background |
-| L3 Cooldown | off | Duplicate triggers from a single utterance |
-| L4 Burst | off | Dense false triggers from audio feedback loops |
-| L5 Energy Jump | off | Video playback, background music |
+| L1 连续帧 | 开 / 2~3帧 | 键盘敲击、椅子响等瞬态短噪声 |
+| L2 峰值/背景 | 关 | 安静环境下模型对底噪的幻觉 |
+| L3 冷却 | 关 | 同一句话被重复识别多次 |
+| L4 爆发封锁 | 关 | 音频回路导致密集误触发 |
+| L5 能量跳变 | 关 | 视频播放、背景音乐等持续噪声 |
 
-L5 ratio: adjustable 2.0-8.0x (default 3.0) via `engine.set_L5_ratio(v)`.
+L5 倍率可调：`engine.set_L5_ratio(3.0)`（2.0-8.0x，默认 3.0）
 
-## Version History
+## 版本历史
 
 **v9.0 (2026-06)**
-- End-to-end inference architecture, ~128KB models
-- Web/Linux/Android unified SDK API
-- L1-L5 five-layer detection pipeline, individually toggleable
-- L5 energy jump detection (curRms/preMin), blocks video/music false triggers
-- COS ZIP direct loading
-- Quiet-room guard (preMin<50 && rms<80)
-- Auto cons_frames (2-char=2, 3+char=3)
+- 端到端推理架构升级，模型 ~128KB
+- Web/Linux/Android 三端统一 API
+- L1-L5 五层防误触发检测，可独立开关
+- L5 能量跳变（curRms/preMin），防视频/音乐误触发
+- COS ZIP 直加载
+- 安静守卫（preMin<50 && rms<80）
+- cons_frames 自动计算（2字=2帧, 3+字=3帧）

@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "C:\\Users\\11745\\.gradle\\daemon\\8.4\\com.voicute.wakeword.app-merged_res-20:\\layout_activity_main.xml.flat",
+        "source": "C:\\Users\\11745\\.gradle\\daemon\\8.4\\com.voicute.wakeword.app-main-22:\\layout\\activity_main.xml"
+    },
+    {
+        "merged": "com.voicute.wakeword.app-merged_res-20:/layout_activity_main.xml.flat",
+        "source": "com.voicute.wakeword.app-main-22:/layout/activity_main.xml"
+    }
+]
