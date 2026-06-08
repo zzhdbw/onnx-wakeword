@@ -1,286 +1,304 @@
 /**
- * Voicute Wake Word — Web Inference (ONNX Runtime Web)
+ * Voicute Wake Word Engine — Web Edition v9.0
  *
- * Matches Android WakeWordEngine logic:
- *   Audio → Mel → Embedding → N classifiers → sigmoid → logit → softmax → trigger
+ * Usage:
+ *   const engine = VoicuteWakeWord.create();
+ *   await engine.load('models/model_info.json', 'models/melspectrogram.onnx');
+ *   await engine.start((word, prob, info) => console.log('detected:', word, prob));
+ *
+ * Detection pipeline (all toggleable, off by default except L1):
+ *   L0: threshold > 0.4          — always active
+ *   L1: N consecutive frames      — filters transient clicks/noise
+ *   L2: peak/background ratio     — filters model hallucination on silence
+ *   L3: cooldown 1.5s             — prevents duplicate triggers
+ *   L4: burst detection 3/3s→5s   — blocks audio feedback loops
+ *   L5: energy jump ratio         — blocks video/music playback
  */
-ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+
+(function () {
 
 const SAMPLE_RATE = 16000;
-const MEL_HOP_SAMPLES = 160;
-const MEL_WIN_SAMPLES = 400;
-const EMB_WINDOW = 76;
-const EMB_STEP = 8;
-const N_MELS = 32;
+const MEL_HOP = 160, MEL_WIN = 400, N_MELS = 32;
 
-let melSession = null;
-let embSession = null;
-let models = [];       // { name, session, embFrames }
-let maxEmbFrames = 0;
-let audioSamplesNeeded = 0;
+// ═══════════════════════════════════════════════
+// Engine
+// ═══════════════════════════════════════════════
 
-// ── Load models from model_info.json ──
+window.VoicuteWakeWord = {
+    create() {
+        let melSession = null, models = [];
+        let dscnnMode = false, dscnnMelTime = 98;
+        let audioSamplesNeeded = 0;
 
-async function loadModel(url) {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Failed to load ${url}: ${resp.status}`);
-    const buf = await resp.arrayBuffer();
-    return await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
-}
+        // ---- Detection state ----
+        let cons = 0, consWord = '';
+        let lastTrig = 0, blocked = 0;
+        let bgEma = 0.001;
+        const PEAK_HIST = 128;
+        const pHist = new Float32Array(PEAK_HIST);
+        const tHist = new Float32Array(PEAK_HIST); let pHi = 0;
 
-async function loadModels(modelInfoUrl, melUrl, embUrl) {
-    melSession = await loadModel(melUrl);
-    embSession = await loadModel(embUrl);
+        // Layer toggles
+        let L1 = true, L2 = false, L3 = false, L4 = false, L5 = false;
+        let l5ratio = 3.0;  // L5 energy jump ratio, adjustable (2.0-8.0)
+        let l5rms = 0;
+        const RMS_HIST = 128;
+        const rmsHist = new Float32Array(RMS_HIST);
+        const rmsTHist = new Array(RMS_HIST).fill(0); let l5ri = 0;
+        const bT = new Float32Array(8), bW = new Array(8); let bi = 0;
 
-    // Base path for model files relative to model_info.json
-    const basePath = modelInfoUrl.substring(0, modelInfoUrl.lastIndexOf('/') + 1);
+        let _debugLog = false;
+        const _log = (...a) => { if (_debugLog) console.log(...a); };
+        const _warn = (...a) => { if (_debugLog) console.warn(...a); };
+        const debug = { sampleRate: 0, lastScores: {}, inferCount: 0, consCount: 0 };
 
-    const infoResp = await fetch(modelInfoUrl);
-    const info = await infoResp.json();
+        // ---- Audio state ----
+        let audioCtx = null, stream = null, listening = false;
+        let ringBuf = null, ringPos = 0, lastRingPos = 0;
+        let processorNode = null, busy = false;
+        let cfgThreshold = 0.40, cfgCooldown = 1500;
 
-    if (info.multi_model && info.models) {
-        for (const m of info.models) {
-            const session = await loadModel(basePath + m.model_file);
-            models.push({ name: m.wake_word, session, embFrames: m.emb_frames });
-            if (m.emb_frames > maxEmbFrames) maxEmbFrames = m.emb_frames;
+        // ═══════════════════════════
+        // Model loading
+        // ═══════════════════════════
+
+        async function _loadOrtModel(url) {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(`load ${url}: ${r.status}`);
+            return await ort.InferenceSession.create(await r.arrayBuffer(), { executionProviders: ['wasm'] });
         }
-    } else if (info.model_type === 'multi') {
-        // Multi-class model: single ONNX with softmax output
-        // Handled in process() separately
-        for (const name of info.wake_words) {
-            models.push({ name, session: await loadModel(info.model_file), embFrames: info.emb_frames, multiClass: true });
-        }
-        maxEmbFrames = info.emb_frames;
-    } else {
-        const session = await loadModel(info.model_file);
-        models.push({ name: info.wake_word, session, embFrames: info.emb_frames || 16 });
-        maxEmbFrames = info.emb_frames || 16;
-    }
-    audioSamplesNeeded = (EMB_WINDOW + (maxEmbFrames - 1) * EMB_STEP) * MEL_HOP_SAMPLES + MEL_WIN_SAMPLES;
-    console.log(`[wakeword] ${models.length} model(s), maxEmbFrames=${maxEmbFrames}, audioSamplesNeeded=${audioSamplesNeeded}`);
-}
 
-// ── Process one audio chunk ──
+        async function load(modelInfoUrl, melUrl) {
+            melSession = await _loadOrtModel(melUrl);
 
-async function process(audioData) {
-    if (!melSession || !embSession || models.length === 0) return null;
+            const resp = await fetch(modelInfoUrl);
+            const buf = await resp.arrayBuffer();
+            const header = new Uint8Array(buf, 0, 4);
+            const isZip = header[0] === 0x50 && header[1] === 0x4b;
 
-    // 1. Mel spectrogram
-    const melIn = new ort.Tensor('float32', audioData, [1, audioData.length]);
-    const melOut = await melSession.run({ input: melIn });
-    const mel = melOut[Object.keys(melOut)[0]].data;
-    const frames = Math.floor((audioData.length - MEL_WIN_SAMPLES) / MEL_HOP_SAMPLES) + 1;
-    if (frames < EMB_WINDOW) return null;
-
-    // 2. Transform: x/10 + 2 (matches Android)
-    const mel2d = new Float32Array(frames * N_MELS);
-    for (let i = 0; i < frames * N_MELS; i++) mel2d[i] = mel[i] / 10.0 + 2.0;
-
-    // 3. Embedding batch
-    let startFrame = frames - EMB_WINDOW - (maxEmbFrames - 1) * EMB_STEP;
-    if (startFrame < 0) startFrame = 0;
-    const embBatch = new Float32Array(maxEmbFrames * EMB_WINDOW * N_MELS);
-    for (let w = 0; w < maxEmbFrames; w++) {
-        let off = startFrame + w * EMB_STEP;
-        if (off + EMB_WINDOW > frames) off = frames - EMB_WINDOW;
-        for (let f = 0; f < EMB_WINDOW; f++) {
-            for (let m = 0; m < N_MELS; m++) {
-                embBatch[w * EMB_WINDOW * N_MELS + f * N_MELS + m] = mel2d[(off + f) * N_MELS + m];
+            let info, zip;
+            if (isZip) {
+                if (typeof JSZip === 'undefined') throw new Error('JSZip required for ZIP packages — add <script src="jszip.min.js">');
+                zip = await JSZip.loadAsync(buf);
+                const infoFile = zip.file('model_info.json');
+                if (!infoFile) throw new Error('model_info.json not found in ZIP');
+                info = JSON.parse(await infoFile.async('string'));
+            } else {
+                info = JSON.parse(new TextDecoder().decode(buf));
             }
+
+            dscnnMode = info.model_type === 'dscnn';
+            dscnnMelTime = info.mel_time || 98;
+            const cfg = (info.multi_model && info.models) ? info.models : [info];
+            models = await Promise.all(cfg.map(async m => ({
+                name: m.wake_word,
+                session: await (async () => {
+                    if (zip) {
+                        const f = zip.file(m.model_file);
+                        if (!f) throw new Error(`${m.model_file} not found in ZIP`);
+                        return await ort.InferenceSession.create(await f.async('arraybuffer'), { executionProviders: ['wasm'] });
+                    }
+                    const base = modelInfoUrl.substring(0, modelInfoUrl.lastIndexOf('/') + 1);
+                    return await _loadOrtModel(base + m.model_file);
+                })(),
+                consFrames: m.cons_frames || 3,
+            })));
+            audioSamplesNeeded = dscnnMode
+                ? dscnnMelTime * MEL_HOP + MEL_WIN
+                : (76 + (Math.max(...models.map(m => m.embFrames || 1)) - 1) * 8) * MEL_HOP + MEL_WIN;
+            _log(`[wakeword] ${models.length} model(s), dscnn=${dscnnMode}`);
         }
-    }
 
-    const embIn = new ort.Tensor('float32', embBatch, [maxEmbFrames, EMB_WINDOW, N_MELS, 1]);
-    const embOut = await embSession.run({ input_1: embIn });
-    const embeddings = embOut[Object.keys(embOut)[0]].data;  // [maxEmbFrames * 96]
+        // ═══════════════════════════
+        // Inference
+        // ═══════════════════════════
 
-    // 4. Run each classifier with its emb_frames slice
-    const sigmoidProbs = [];
-    const wordNames = [];
-    for (const model of models) {
-        const ef = model.embFrames;
-        const sliceStart = maxEmbFrames - ef;
-        const wakeInput = new Float32Array(ef * 96);
-        let idx = 0;
-        for (let w = sliceStart; w < sliceStart + ef; w++) {
-            for (let d = 0; d < 96; d++) {
-                wakeInput[idx++] = embeddings[w * 96 + d];
-            }
-        }
-        const wakeIn = new ort.Tensor('float32', wakeInput, [1, ef, 96]);
-        const wakeOut = await model.session.run({ input: wakeIn });
-        sigmoidProbs.push(wakeOut[Object.keys(wakeOut)[0]].data[0]);
-        wordNames.push(model.name);
-    }
+        async function predict(audioData) {
+            if (!melSession || models.length === 0) return null;
+            const melIn = new ort.Tensor('float32', audioData, [1, audioData.length]);
+            const melOut = await melSession.run({ input: melIn });
+            const mel = melOut[Object.keys(melOut)[0]].data;
+            const frames = Math.floor(mel.length / N_MELS);
+            const mel2d = new Float32Array(frames * N_MELS);
+            for (let i = 0; i < frames * N_MELS; i++) mel2d[i] = mel[i] / 10 + 2;
+            debug.inferCount++;
 
-    // 5. Sigmoid → logit → softmax (matches Android)
-    const K = models.length;
-    const logits = new Array(K + 1);
-    let maxLogit = -Infinity;
-    for (let i = 0; i < K; i++) {
-        const p = Math.max(1e-6, Math.min(1 - 1e-6, sigmoidProbs[i]));
-        logits[i] = Math.log(p / (1 - p));
-        if (logits[i] > maxLogit) maxLogit = logits[i];
-    }
-    logits[K] = 0;  // background class
-
-    let sumExp = 0;
-    const softmax = new Array(K + 1);
-    for (let i = 0; i <= K; i++) {
-        softmax[i] = Math.exp(logits[i] - maxLogit);
-        sumExp += softmax[i];
-    }
-
-    let bestScore = -1, bestName = null;
-    const allProbs = {};
-    for (let i = 0; i < K; i++) {
-        softmax[i] /= sumExp;
-        allProbs[wordNames[i]] = softmax[i];
-        if (softmax[i] > bestScore) {
-            bestScore = softmax[i];
-            bestName = wordNames[i];
-        }
-    }
-    const bgProb = softmax[K] / sumExp;
-
-    return {
-        wakeWord: bestName,
-        probability: bestScore,
-        background: bgProb,
-        allProbs,
-    };
-}
-
-// ── Relative confidence gate ──
-
-function createConfidenceGate(opts) {
-    const {
-        bgEmaAlpha = 0.002,
-        relativeRatio = 3.0,
-        absoluteThreshold = 0.5,
-        cooldownMs = 3500,
-        initialBackground = 0.01,
-    } = opts || {};
-
-    let backgroundEMA = initialBackground;
-    let lastDetectTime = 0;
-
-    function reset() {
-        backgroundEMA = initialBackground;
-        lastDetectTime = 0;
-    }
-
-    function onScore(score) {
-        backgroundEMA = bgEmaAlpha * score + (1 - bgEmaAlpha) * backgroundEMA;
-        if (backgroundEMA < 0.001) backgroundEMA = initialBackground;
-        const ratio = score / backgroundEMA;
-        const now = Date.now();
-        if (score > absoluteThreshold && ratio > relativeRatio && (now - lastDetectTime) > cooldownMs) {
-            lastDetectTime = now;
-            return true;
-        }
-        return false;
-    }
-
-    return { onScore, reset };
-}
-
-// ── Microphone streaming ──
-
-function createDetector() {
-    let audioCtx = null;
-    let stream = null;
-    let listening = false;
-    let ringBuf = null;
-    let ringPos = 0;
-    let lastRingPos = 0;
-    let processorNode = null;
-    let busy = false;
-
-    function resample(audio, fromRate) {
-        if (fromRate === SAMPLE_RATE) return audio;
-        const ratio = fromRate / SAMPLE_RATE;
-        const newLen = Math.round(audio.length / ratio);
-        const out = new Float32Array(newLen);
-        for (let i = 0; i < newLen; i++) {
-            const src = i * ratio;
-            const lo = Math.floor(src);
-            const hi = Math.min(lo + 1, audio.length - 1);
-            const frac = src - lo;
-            out[i] = audio[lo] * (1 - frac) + audio[hi] * frac;
-        }
-        return out;
-    }
-
-    async function startMic(onResult) {
-        stream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-        });
-        audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-        const hwRate = audioCtx.sampleRate;
-        const needed = Math.ceil((audioSamplesNeeded / SAMPLE_RATE) * hwRate);
-        const ringSize = hwRate * 3;
-        const stride = Math.round(0.25 * hwRate);
-        ringBuf = new Float32Array(ringSize);
-        ringPos = 0;
-        lastRingPos = 0;
-        listening = true;
-        busy = false;
-        let totalCollected = 0;
-
-        const source = audioCtx.createMediaStreamSource(stream);
-        processorNode = audioCtx.createScriptProcessor(2048, 1, 1);
-
-        async function runIfReady() {
-            if (!listening || busy) return;
-            const newSamples = (ringPos - lastRingPos + ringSize) % ringSize;
-            if (newSamples < stride) return;
-            busy = true;
-            const pos = ringPos;
-            lastRingPos = pos;
-            const raw = new Float32Array(needed);
-            for (let i = 0; i < needed; i++) {
-                raw[i] = ringBuf[(pos - needed + i + ringSize) % ringSize];
-            }
-            try {
-                const chunk = resample(raw, hwRate);
-                const result = await process(chunk);
-                if (listening && totalCollected >= needed) {
-                    onResult(result ? result.probability : 0, result ? result.allProbs : {});
+            const scores = [], words = [], cfList = [];
+            if (dscnnMode) {
+                const start = Math.max(0, frames - dscnnMelTime);
+                const input = new Float32Array(dscnnMelTime * N_MELS);
+                for (let f = 0; f < dscnnMelTime; f++) {
+                    const s = start + f;
+                    if (s >= 0 && s < frames) input.set(mel2d.subarray(s * N_MELS, (s + 1) * N_MELS), f * N_MELS);
                 }
-            } catch (e) {
-                console.warn('[wakeword] inference error', e);
-            } finally {
-                busy = false;
+                for (const m of models) {
+                    const out = await m.session.run({ input: new ort.Tensor('float32', input, [1, dscnnMelTime, N_MELS]) });
+                    scores.push(out[Object.keys(out)[0]].data[0]);
+                    words.push(m.name); cfList.push(m.consFrames);
+                }
+            } else { return null; }
+
+            // Sigmoid → softmax
+            const K = models.length;
+            const logits = new Array(K + 1); let maxL = -Infinity;
+            for (let i = 0; i < K; i++) {
+                const p = Math.max(1e-6, Math.min(1 - 1e-6, scores[i]));
+                logits[i] = Math.log(p / (1 - p)); if (logits[i] > maxL) maxL = logits[i];
             }
+            logits[K] = 0;
+            let sum = 0; const sm = new Array(K + 1);
+            for (let i = 0; i <= K; i++) { sm[i] = Math.exp(logits[i] - maxL); sum += sm[i]; }
+            let bestS = -1, bestW = null, bestC = 5, all = {};
+            for (let i = 0; i < K; i++) { sm[i] /= sum; all[words[i]] = sm[i]; if (sm[i] > bestS) { bestS = sm[i]; bestW = words[i]; bestC = cfList[i]; } }
+            debug.lastScores = all;
+            return { word: bestW, prob: bestS, bg: sm[K] / sum, all, consFrames: bestC };
         }
 
-        processorNode.onaudioprocess = (e) => {
-            if (!listening) return;
-            const input = e.inputBuffer.getChannelData(0);
-            for (let i = 0; i < input.length; i++) {
-                ringBuf[ringPos] = input[i];
-                ringPos = (ringPos + 1) % ringSize;
+        // ═══════════════════════════
+        // Detection
+        // ═══════════════════════════
+
+        function detect(word, prob, consFrames, threshold, cooldownMs, now) {
+            if (!word || prob < threshold) { cons = 0; consWord = ''; return null; }
+            if (now < blocked) { cons = 0; consWord = ''; return null; }
+            debug.consCount = cons;
+
+            // L5: energy jump ratio
+            if (L5 && l5rms > 0) {
+                const ps = now - 2000, pe = now - 500;
+                let pMin = Infinity, pN = 0;
+                for (let i = 0; i < RMS_HIST; i++) {
+                    if (rmsTHist[i] > 0 && rmsTHist[i] >= ps && rmsTHist[i] <= pe) {
+                        if (rmsHist[i] < pMin) pMin = rmsHist[i]; pN++;
+                    }
+                }
+                const ratio = pN >= 5 ? l5rms / Math.max(pMin, 1) : -1;
+                let block = pN >= 5 && l5rms < pMin * l5ratio;
+                if (!block && pN >= 5 && pMin < 50 && l5rms < 80) block = true;
+                if (_debugLog && (debug.inferCount % 5 === 0 || block)) {
+                    _log(`[L5] rms=${l5rms.toFixed(0)} preMin=${pN>=5?pMin.toFixed(0):'?'} preN=${pN} ratio=${ratio>=0?ratio.toFixed(1):'?'} blocked=${block} word=${word} prob=${prob.toFixed(3)}`);
+                }
+                if (block) { cons = 0; consWord = ''; return null; }
             }
-            totalCollected += input.length;
-            runIfReady();
+
+            // L1: consecutive frames
+            if (L1) {
+                const hi = prob > threshold && word;
+                if (hi && word === consWord) cons++; else if (hi) { consWord = word; cons = 1; } else { cons = 0; consWord = ''; }
+                if (cons < consFrames) return null;
+            }
+
+            // L2: peak/background
+            if (L2) {
+                pHist[pHi] = prob; tHist[pHi] = now; pHi = (pHi + 1) % PEAK_HIST;
+                if (!word) bgEma = bgEma * 0.995 + prob * 0.005;
+                if (prob <= bgEma * 2.0) { cons = 0; consWord = ''; return null; }
+            }
+
+            // L3: cooldown
+            if (L3 && (now - lastTrig) < cooldownMs) { cons = 0; consWord = ''; return null; }
+
+            // L4: burst
+            if (L4) {
+                bT[bi] = now; bW[bi] = word; bi = (bi + 1) % 8;
+                let bc = 0; for (let i = 0; i < 8; i++) if (bT[i] > 0 && (now - bT[i]) < 3000 && word === bW[i]) bc++;
+                if (bc >= 3) { blocked = now + 5000; cons = 0; consWord = ''; return null; }
+            }
+
+            cons = 0; consWord = ''; lastTrig = now;
+            return word;
+        }
+
+        function reset() {
+            cons = 0; consWord = ''; lastTrig = 0; blocked = 0; bgEma = 0.001;
+            for (let i = 0; i < PEAK_HIST; i++) { pHist[i] = 0; tHist[i] = 0; }
+            for (let i = 0; i < RMS_HIST; i++) { rmsHist[i] = 0; rmsTHist[i] = 0; }
+            l5ri = 0; l5rms = 0;
+        }
+
+        // ═══════════════════════════
+        // Microphone
+        // ═══════════════════════════
+
+        function _rms(a) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / a.length); }
+        function _resample(a, from) {
+            if (from === SAMPLE_RATE) return a;
+            const r = from / SAMPLE_RATE, nl = Math.round(a.length / r), o = new Float32Array(nl);
+            for (let i = 0; i < nl; i++) {
+                const src = i * r, lo = Math.floor(src), hi = Math.min(lo + 1, a.length - 1), f = src - lo;
+                o[i] = a[lo] * (1 - f) + a[hi] * f;
+            }
+            return o;
+        }
+
+        async function start(onResult) {
+            if (listening) { _log('[wakeword] Already running'); return; }
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const hw = audioCtx.sampleRate; debug.sampleRate = hw;
+            _log(`[wakeword] AudioContext: ${hw}Hz`);
+            const needed = Math.ceil((audioSamplesNeeded / SAMPLE_RATE) * hw);
+            const stride = Math.round(0.05 * hw);
+            ringBuf = new Float32Array(hw * 3); ringPos = 0; lastRingPos = 0; busy = false;
+            listening = true; let collected = 0; reset();
+
+            const src = audioCtx.createMediaStreamSource(stream);
+            processorNode = audioCtx.createScriptProcessor(2048, 1, 1);
+
+            async function run() {
+                if (!listening || busy) return;
+                const ns = (ringPos - lastRingPos + ringBuf.length) % ringBuf.length;
+                if (ns < stride) return;
+                busy = true; const pos = ringPos; lastRingPos = pos;
+                const raw = new Float32Array(needed);
+                for (let i = 0; i < needed; i++) raw[i] = ringBuf[(pos - needed + i + ringBuf.length) % ringBuf.length];
+                try {
+                    const chunk = _resample(raw, hw);
+                    if (collected < needed) { busy = false; run(); return; }
+                    const rms = _rms(chunk);
+                    const result = await predict(chunk);
+                    if (!listening || !result) { busy = false; run(); return; }
+                    l5rms = rms; rmsHist[l5ri] = rms; rmsTHist[l5ri] = Date.now(); l5ri = (l5ri + 1) % RMS_HIST;
+                    const d = detect(result.word, result.prob, result.consFrames || 5, cfgThreshold, cfgCooldown, Date.now());
+                    if (d) onResult(d, result.prob, { bg: result.bg, all: result.all, rms });
+                } catch (e) { _warn('[wakeword] error', e.message); }
+                finally { busy = false; run(); }
+            }
+
+            processorNode.onaudioprocess = (e) => {
+                if (!listening) return;
+                const input = e.inputBuffer.getChannelData(0);
+                for (let i = 0; i < input.length; i++) { ringBuf[ringPos] = input[i] * 32767; ringPos = (ringPos + 1) % ringBuf.length; }
+                collected += input.length; run();
+            };
+            src.connect(processorNode); processorNode.connect(audioCtx.destination);
+            _log('[wakeword] Mic started');
+        }
+
+        function stop() {
+            listening = false;
+            if (processorNode) { processorNode.disconnect(); processorNode = null; }
+            ringBuf = null; busy = false;
+            if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+            if (audioCtx && audioCtx.state !== 'closed') { audioCtx.close(); audioCtx = null; }
+        }
+
+        // ═══════════════════════════
+        // Public API
+        // ═══════════════════════════
+
+        return {
+            load, start, stop, predict, detect, reset,
+            setThreshold: v => { cfgThreshold = Math.max(0.3, Math.min(0.95, v)); },
+            setCooldown: v => { cfgCooldown = Math.max(500, v); },
+            setDebug: v => _debugLog = v,
+            setL1: v => L1 = v, setL2: v => L2 = v, setL3: v => L3 = v, setL4: v => L4 = v, setL5: v => L5 = v,
+            setL5Ratio: v => l5ratio = Math.max(2.0, Math.min(8.0, v)),
+            isLoaded: () => !!melSession && models.length > 0,
+            getModels: () => models.map(m => ({ name: m.name, consFrames: m.consFrames })),
+            debug,
         };
-        source.connect(processorNode);
-        processorNode.connect(audioCtx.destination);
-        console.log('[wakeword] Mic started, hwRate:', hwRate);
-    }
+    },
+};
 
-    function stopMic() {
-        listening = false;
-        if (processorNode) { processorNode.disconnect(); processorNode = null; }
-        if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-        if (audioCtx && audioCtx.state !== 'closed') { audioCtx.close(); audioCtx = null; }
-        ringBuf = null;
-        busy = false;
-    }
-
-    function isLoaded() { return !!melSession && models.length > 0; }
-    function getModelNames() { return models.map(m => m.name); }
-
-    return { loadModels, process, startMic, stopMic, isLoaded, getModelNames, createConfidenceGate };
-}
+})();

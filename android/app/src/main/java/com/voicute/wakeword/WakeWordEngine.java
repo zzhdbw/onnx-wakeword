@@ -42,17 +42,25 @@ public class WakeWordEngine {
     static final int EMB_STEP = 8;
     static final int N_MELS = 32;
 
+    // TCN mode: uses different embedding model (3D input: no channel dim)
+    private boolean tcnMode = false;
+    private int embDim = 96;  // NWW=96, TCN=128
+
     /** Detection result with specific wake word name. */
     public static class DetectionResult {
         public final String wakeWord;
         public final float probability;
         /** Mean probability across ALL models — represents background noise level. */
         public final float backgroundMean;
+        /** Per-model recommended consecutive frames (from model_info.json). */
+        public final int recommendedConsFrames;
 
-        public DetectionResult(String wakeWord, float probability, float backgroundMean) {
+        public DetectionResult(String wakeWord, float probability, float backgroundMean,
+                               int recommendedConsFrames) {
             this.wakeWord = wakeWord;
             this.probability = probability;
             this.backgroundMean = backgroundMean;
+            this.recommendedConsFrames = recommendedConsFrames;
         }
     }
 
@@ -60,12 +68,14 @@ public class WakeWordEngine {
         final String wakeWord;
         final String modelFile;
         final int embFrames;
+        final int consFrames;
         OrtSession session;
 
-        ModelSlot(String wakeWord, String modelFile, int embFrames) {
+        ModelSlot(String wakeWord, String modelFile, int embFrames, int consFrames) {
             this.wakeWord = wakeWord;
             this.modelFile = modelFile;
             this.embFrames = embFrames;
+            this.consFrames = consFrames;
         }
     }
 
@@ -74,6 +84,9 @@ public class WakeWordEngine {
     private int maxEmbFrames;
     private int melFramesNeeded;
     private int audioSamplesNeeded;
+    // DS-CNN mode: end-to-end mel→sigmoid, no embedding
+    private boolean dscnnMode = false;
+    private int dscnnMelTime = 50;  // mel frames for DS-CNN input
     // Multi-class model (single ONNX with softmax)
     private boolean multiClassModel = false;
     private int nClasses = 0;
@@ -95,6 +108,7 @@ public class WakeWordEngine {
 
     /** Number of wake word models loaded. */
     public int getModelCount() { return models.size(); }
+    public boolean isDscnnMode() { return dscnnMode; }
 
     private final OrtEnvironment env;
     private OrtSession melSession;
@@ -103,7 +117,9 @@ public class WakeWordEngine {
     private boolean loaded;
     private String errorMessage = null;
     private int debugLogCount = 0;
-    private static final int DEBUG_LOG_MAX = 3;
+    private static final int DEBUG_LOG_MAX = 50;
+    private long engineStartTime = System.currentTimeMillis();
+    private static final long STARTUP_SKIP_MS = 3000;  // skip first 3s to avoid cold-start FP
 
     public WakeWordEngine(Context context) {
         env = OrtEnvironment.getEnvironment();
@@ -121,8 +137,22 @@ public class WakeWordEngine {
             }
             JSONObject info = new JSONObject(new String(infoBytes, "UTF-8"));
 
-            // --- Multi-class model (single ONNX, softmax output) ---
+            // --- Mode detection ---
             String modelType = info.optString("model_type", "");
+            tcnMode = modelType.equals("tcn");
+            dscnnMode = modelType.equals("dscnn");
+            if (tcnMode) {
+                embDim = info.optInt("emb_dim", 128);
+            }
+            if (dscnnMode) {
+                dscnnMelTime = info.optInt("mel_time", 50);
+                Log.i(TAG, "DS-CNN mel_time=" + dscnnMelTime + " (from config: " + info.optInt("mel_time", -1) + ")");
+            }
+            String embModelFile = info.optString("emb_model", EMB_MODEL);
+            Log.i(TAG, "Mode: " + (dscnnMode ? "DS-CNN" : (tcnMode ? "TCN" : "NWW"))
+                    + " embDim=" + embDim + " embModel=" + embModelFile);
+
+            // --- Multi-class model (single ONNX, softmax output) ---
             multiClassModel = modelType.equals("multi");
 
             if (multiClassModel) {
@@ -146,15 +176,17 @@ public class WakeWordEngine {
                     String word = m.getString("wake_word");
                     String file = m.getString("model_file");
                     int ef = m.getInt("emb_frames");
-                    models.add(new ModelSlot(word, file, ef));
+                    int cf = m.optInt("cons_frames", 5);
+                    models.add(new ModelSlot(word, file, ef, cf));
                     Log.i(TAG, "Registered: " + word + " emb_frames=" + ef + " file=" + file);
                 }
             } else {
                 String word = info.getString("wake_word");
                 String file = info.getString("model_file");
                 int ef = info.optInt("emb_frames", 16);
-                models.add(new ModelSlot(word, file, ef));
-                Log.i(TAG, "Single model: " + word + " emb_frames=" + ef);
+                int cf = info.optInt("cons_frames", 5);
+                models.add(new ModelSlot(word, file, ef, cf));
+                Log.i(TAG, "Single model: " + word + " emb_frames=" + ef + " cons_frames=" + cf);
             }
 
             if (!multiClassModel) {
@@ -167,15 +199,25 @@ public class WakeWordEngine {
                 }
             }
 
-            melFramesNeeded = EMB_WINDOW + (maxEmbFrames - 1) * EMB_STEP;
-            audioSamplesNeeded = melFramesNeeded * MEL_HOP_SAMPLES + (int) (SAMPLE_RATE * MEL_WIN_SEC);
+            if (dscnnMode) {
+                // DS-CNN: directly feed mel window [melTime, N_MELS]
+                melFramesNeeded = dscnnMelTime;
+                audioSamplesNeeded = melFramesNeeded * MEL_HOP_SAMPLES + (int) (SAMPLE_RATE * MEL_WIN_SEC);
+            } else {
+                melFramesNeeded = EMB_WINDOW + (maxEmbFrames - 1) * EMB_STEP;
+                audioSamplesNeeded = melFramesNeeded * MEL_HOP_SAMPLES + (int) (SAMPLE_RATE * MEL_WIN_SEC);
+            }
             Log.i(TAG, "maxEmbFrames=" + maxEmbFrames
                     + " melFramesNeeded=" + melFramesNeeded
                     + " audioSamplesNeeded=" + audioSamplesNeeded);
 
             // Shared feature extractors
             melSession = loadModel(context, MEL_MODEL);
-            embSession = loadModel(context, EMB_MODEL);
+            if (!dscnnMode) {
+                embSession = loadModel(context, embModelFile);
+            } else {
+                embSession = null;
+            }
 
             if (multiClassModel) {
                 multiClassSession = loadModel(context, multiClassModelFile);
@@ -241,7 +283,8 @@ public class WakeWordEngine {
             melOut.close();
 
             int frames = mel[0][0].length;
-            if (frames < EMB_WINDOW) return null;
+            if (!dscnnMode && frames < EMB_WINDOW) return null;
+            if (dscnnMode && frames < dscnnMelTime / 4) return null;  // need at least some frames
 
             // 3. Apply transform: x/10 + 2 (shared)
             float[][] mel2d = new float[frames][N_MELS];
@@ -251,36 +294,142 @@ public class WakeWordEngine {
                 }
             }
 
-            // 4. Embedding batch using maxEmbFrames (shared)
+            // 4. DS-CNN path: mel → classifier (end-to-end, no embedding)
+            if (dscnnMode) {
+                // Skip first 3s to avoid cold-start false triggers
+                if (System.currentTimeMillis() - engineStartTime < STARTUP_SKIP_MS) return null;
+
+                int melStart = Math.max(0, frames - dscnnMelTime);
+                float[][][] dscnnInput = new float[1][dscnnMelTime][N_MELS];
+                for (int f = 0; f < dscnnMelTime; f++) {
+                    int srcF = melStart + f;
+                    if (srcF >= 0 && srcF < frames) {
+                        System.arraycopy(mel2d[srcF], 0, dscnnInput[0][f], 0, N_MELS);
+                    }
+                    // else: zero-padded (already 0 from new float[])
+                }
+
+                // Flatten to 1D and use explicit shape to avoid dimension misinterpretation
+                float[] flatInput = new float[dscnnMelTime * N_MELS];
+                for (int f = 0; f < dscnnMelTime; f++) {
+                    System.arraycopy(dscnnInput[0][f], 0, flatInput, f * N_MELS, N_MELS);
+                }
+                // Run ALL models, take highest confidence
+                float bestSigmoid = 0;
+                String bestWord = null;
+                int bestConsFrames = 5;
+                for (ModelSlot model : models) {
+                    OnnxTensor dscnnIn = OnnxTensor.createTensor(env,
+                            java.nio.FloatBuffer.wrap(flatInput),
+                            new long[]{1, dscnnMelTime, N_MELS});
+                    OrtSession.Result dscnnOut = model.session.run(
+                            Collections.singletonMap("input", dscnnIn));
+                    Object rawOut = dscnnOut.get(0).getValue();
+                    float sigmoid;
+                    if (rawOut instanceof float[][]) {
+                        float[][] score = (float[][]) rawOut;
+                        sigmoid = score[0][0];
+                    } else if (rawOut instanceof float[]) {
+                        float[] score = (float[]) rawOut;
+                        sigmoid = score[0];
+                    } else {
+                        Log.e(TAG, "DS-CNN unexpected output type: " + rawOut.getClass().getName());
+                        sigmoid = 0f;
+                    }
+                    if (sigmoid > bestSigmoid) {
+                        bestSigmoid = sigmoid;
+                        bestWord = model.wakeWord;
+                        bestConsFrames = model.consFrames;
+                    }
+                    dscnnIn.close();
+                    dscnnOut.close();
+                }
+                float sigmoid = bestSigmoid;
+                // Log first 20 inferences
+                if (debugLogCount < 20) {
+                    debugLogCount++;
+                    float melSum = 0, melMin = Float.MAX_VALUE, melMax = -Float.MAX_VALUE;
+                    for (int f = 0; f < dscnnMelTime; f++) {
+                        for (int m = 0; m < N_MELS; m++) {
+                            float v = dscnnInput[0][f][m];
+                            melSum += v;
+                            if (v < melMin) melMin = v;
+                            if (v > melMax) melMax = v;
+                        }
+                    }
+                    float melMean = melSum / (dscnnMelTime * N_MELS);
+                    Log.d(TAG, String.format(Locale.US,
+                            "[DS-CNN] %d models sig=%.4f word=%s melMean=%.2f melMin=%.2f melMax=%.2f",
+                            models.size(), sigmoid, bestWord != null ? bestWord : "-",
+                            melMean, melMin, melMax));
+                }
+
+                float bgProb = 1.0f - sigmoid;
+                String detected = sigmoid > 0.5f ? bestWord : null;
+                return new DetectionResult(detected, sigmoid, bgProb, bestConsFrames);
+            }
+
+            // 5. Embedding batch using maxEmbFrames (shared)
             int startFrame = frames - EMB_WINDOW - (maxEmbFrames - 1) * EMB_STEP;
             if (startFrame < 0) startFrame = 0;
 
-            float[][][][] embBatch = new float[maxEmbFrames][EMB_WINDOW][N_MELS][1];
-            for (int w = 0; w < maxEmbFrames; w++) {
-                int offset = startFrame + w * EMB_STEP;
-                if (offset + EMB_WINDOW > frames) offset = frames - EMB_WINDOW;
-                for (int f = 0; f < EMB_WINDOW; f++) {
-                    for (int m = 0; m < N_MELS; m++) {
-                        embBatch[w][f][m][0] = mel2d[offset + f][m];
+            float[][][][] embeddings;
+            if (tcnMode) {
+                // TCN: 3D input [maxEmbFrames][76][32] (no channel dim)
+                float[][][] embBatch = new float[maxEmbFrames][EMB_WINDOW][N_MELS];
+                for (int w = 0; w < maxEmbFrames; w++) {
+                    int offset = startFrame + w * EMB_STEP;
+                    if (offset + EMB_WINDOW > frames) offset = frames - EMB_WINDOW;
+                    for (int f = 0; f < EMB_WINDOW; f++) {
+                        for (int m = 0; m < N_MELS; m++) {
+                            embBatch[w][f][m] = mel2d[offset + f][m];
+                        }
                     }
                 }
+                OnnxTensor embIn = OnnxTensor.createTensor(env, embBatch);
+                OrtSession.Result embOut = embSession.run(
+                        Collections.singletonMap("input_1", embIn));
+                // TCN op13: 2D [B, 128]; TCN op17: 4D [B, 1, 1, 128]
+                Object embRaw = embOut.get(0).getValue();
+                if (embRaw instanceof float[][]) {
+                    float[][] emb2d = (float[][]) embRaw;
+                    embeddings = new float[maxEmbFrames][1][1][embDim];
+                    for (int w = 0; w < maxEmbFrames; w++) {
+                        System.arraycopy(emb2d[w], 0, embeddings[w][0][0], 0, embDim);
+                    }
+                } else {
+                    embeddings = (float[][][][]) embRaw;
+                }
+                embIn.close();
+                embOut.close();
+            } else {
+                // NWW: 4D input [maxEmbFrames][76][32][1] (with channel dim)
+                float[][][][] embBatch = new float[maxEmbFrames][EMB_WINDOW][N_MELS][1];
+                for (int w = 0; w < maxEmbFrames; w++) {
+                    int offset = startFrame + w * EMB_STEP;
+                    if (offset + EMB_WINDOW > frames) offset = frames - EMB_WINDOW;
+                    for (int f = 0; f < EMB_WINDOW; f++) {
+                        for (int m = 0; m < N_MELS; m++) {
+                            embBatch[w][f][m][0] = mel2d[offset + f][m];
+                        }
+                    }
+                }
+                OnnxTensor embIn = OnnxTensor.createTensor(env, embBatch);
+                OrtSession.Result embOut = embSession.run(
+                        Collections.singletonMap("input_1", embIn));
+                embeddings = (float[][][][]) embOut.get(0).getValue();
+                embIn.close();
+                embOut.close();
             }
-
-            OnnxTensor embIn = OnnxTensor.createTensor(env, embBatch);
-            OrtSession.Result embOut = embSession.run(
-                    Collections.singletonMap("input_1", embIn));
-            float[][][][] embeddings = (float[][][][]) embOut.get(0).getValue();
-            embIn.close();
-            embOut.close();
 
             // 5. Multi-class model path
             if (multiClassModel) {
                 // Flatten all embedding frames into single input vector
-                int flatDim = maxEmbFrames * 96;
+                int flatDim = maxEmbFrames * embDim;
                 float[][] multiIn = new float[1][flatDim];
                 int idx = 0;
                 for (int w = 0; w < maxEmbFrames; w++) {
-                    for (int d = 0; d < 96; d++) {
+                    for (int d = 0; d < embDim; d++) {
                         multiIn[0][idx++] = embeddings[w][0][0][d];
                     }
                 }
@@ -304,7 +453,7 @@ public class WakeWordEngine {
                 }
                 float backgroundProb = probs[0][K];
 
-                return new DetectionResult(bestWord, bestScore, backgroundProb);
+                return new DetectionResult(bestWord, bestScore, backgroundProb, 5);
             }
 
             // 6. Binary model path — collect sigmoid outputs
@@ -312,9 +461,9 @@ public class WakeWordEngine {
             for (int i = 0; i < models.size(); i++) {
                 ModelSlot model = models.get(i);
                 int sliceStart = maxEmbFrames - model.embFrames;
-                float[][][] wakeInput = new float[1][model.embFrames][96];
+                float[][][] wakeInput = new float[1][model.embFrames][embDim];
                 for (int w = 0; w < model.embFrames; w++) {
-                    for (int d = 0; d < 96; d++) {
+                    for (int d = 0; d < embDim; d++) {
                         wakeInput[0][w][d] = embeddings[sliceStart + w][0][0][d];
                     }
                 }
@@ -322,8 +471,15 @@ public class WakeWordEngine {
                 OnnxTensor wakeIn = OnnxTensor.createTensor(env, wakeInput);
                 OrtSession.Result wakeOut = model.session.run(
                         Collections.singletonMap("input", wakeIn));
-                float[][][] score = (float[][][]) wakeOut.get(0).getValue();
-                sigmoidProbs[i] = score[0][0][0];
+                if (tcnMode) {
+                    // TCN classifier: [1, embFrames, 128] → [1, 1]
+                    float[][] score = (float[][]) wakeOut.get(0).getValue();
+                    sigmoidProbs[i] = score[0][0];
+                } else {
+                    // NWW classifier: [1, embFrames, 96] → [1, 1, 1]
+                    float[][][] score = (float[][][]) wakeOut.get(0).getValue();
+                    sigmoidProbs[i] = score[0][0][0];
+                }
                 wakeIn.close();
                 wakeOut.close();
             }
@@ -356,22 +512,39 @@ public class WakeWordEngine {
             // 7. Find best non-background word
             float bestScore = -1f;
             String bestWord = null;
+            int bestConsFrames = 5;
             for (int i = 0; i < K; i++) {
                 if (softmaxProbs[i] > bestScore) {
                     bestScore = softmaxProbs[i];
                     bestWord = models.get(i).wakeWord;
+                    bestConsFrames = models.get(i).consFrames;
                 }
             }
             float backgroundProb = softmaxProbs[K];
 
             if (debugLogCount < DEBUG_LOG_MAX) {
+                // Raw sigmoid values before softmax
+                StringBuilder rawSig = new StringBuilder();
+                for (int i = 0; i < Math.min(models.size(), 3); i++) {
+                    if (i > 0) rawSig.append(", ");
+                    rawSig.append(String.format(Locale.US, "sig[%d]=%.6f", i, sigmoidProbs[i]));
+                }
+                // Embedding stats: norm of first window, first 3 dims
+                float embNorm = 0;
+                for (int d = 0; d < embDim; d++) {
+                    float v = embeddings[0][0][0][d];
+                    embNorm += v * v;
+                }
+                embNorm = (float) Math.sqrt(embNorm);
                 Log.d(TAG, String.format(Locale.US,
-                        "[DEBUG %d] frames=%d maxEmb=%d best=%s softmax=%.2f%% bg=%.2f%%",
-                        debugLogCount, frames, maxEmbFrames, bestWord, bestScore * 100, backgroundProb * 100));
+                        "[DEBUG %d] frames=%d emb=[%.3f,%.3f,%.3f] norm=%.3f | %s",
+                        debugLogCount, frames,
+                        embeddings[0][0][0][0], embeddings[0][0][0][1], embeddings[0][0][0][2],
+                        embNorm, rawSig.toString()));
                 debugLogCount++;
             }
 
-            return new DetectionResult(bestWord, bestScore, backgroundProb);
+            return new DetectionResult(bestWord, bestScore, backgroundProb, bestConsFrames);
 
         } catch (OrtException e) {
             Log.e(TAG, "Inference error", e);

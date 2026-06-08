@@ -1,64 +1,54 @@
 # Android 唤醒词 Demo
 
-完整 Android 项目，用 Android Studio 打开即可运行。
+完整 Android 项目，Android Studio 打开即可运行。
 
 ## 使用
 
-1. **复制模型文件到 assets**
+1. 复制 ONNX 模型和 `model_info.json` 到 `app/src/main/assets/`
+2. Android Studio 打开 `android/` 目录，编译运行
 
-将以下文件放入 `app/src/main/assets/`：
+## 模型配置
 
-```
-assets/
-├── melspectrogram.onnx      # 必须（项目已提供）
-├── embedding_model.onnx     # 必须（项目已提供）
-├── model_info.json          # 编辑唤醒词配置
-└── your_model.onnx          # 你的模型
-```
-
-2. **编辑 model_info.json**
+DS-CNN 架构（推荐）：
 
 ```json
 {
-  "wake_word": "你的唤醒词",
-  "model_file": "your_model.onnx",
-  "emb_frames": 16
+  "model_type": "dscnn",
+  "mel_time": 98,
+  "multi_model": true,
+  "models": [
+    {"wake_word": "曼波", "model_file": "dscnn_multiscale_manbo.onnx", "cons_frames": 3},
+    {"wake_word": "你好电脑", "model_file": "dscnn_multiscale_nihaodiannao.onnx", "cons_frames": 3}
+  ]
 }
 ```
 
-3. **Android Studio 打开项目，运行**
+## 核心类
 
-## 项目结构
+| 文件 | 说明 |
+|------|------|
+| `WakeWordEngine.java` | 模型加载、mel 特征提取、推理（支持 DS-CNN 和 NWW） |
+| `DetectionLogic.java` | L1-L5 五层防误触发检测 |
+| `AudioCapture.java` | 麦克风采集、锁-free 环形缓冲区 |
+| `MainActivity.java` | Demo UI |
 
-```
-android/
-├── app/
-│   ├── build.gradle              # ONNX Runtime 依赖
-│   └── src/main/
-│       ├── AndroidManifest.xml
-│       ├── assets/               # ← 模型放这里
-│       ├── java/com/voicute/wakeword/
-│       │   ├── WakeWordEngine.java  # 推理引擎
-│       │   └── MainActivity.java    # 界面
-│       └── res/layout/
-│           └── activity_main.xml
-├── build.gradle
-└── settings.gradle
-```
+## L1-L5 检测层
 
-## 关键代码
+| 层 | 默认 | 说明 |
+|:---:|:---:|------|
+| L1 | on / 3帧 | 连续帧过滤瞬态噪声（键盘、椅子） |
+| L2 | off | 峰值/背景比，防静音幻觉 |
+| L3 | off | 1.5s 冷却 |
+| L4 | off | 爆发封锁（3次/3s → 5s） |
+| L5 | off | 能量跳变（防视频/音乐误触发） |
 
-`WakeWordEngine.java` 是推理核心，可以单独提取到其他项目：
+L5 倍数滑块：2.0-5.0x，默认 3.0。
 
-```java
-// 初始化
-WakeWordEngine engine = new WakeWordEngine(context);
+## 依赖
 
-// 处理音频（16kHz, mono, PCM 16-bit，每 ~30ms 调用一次）
-short[] chunk = getAudioFromMicrophone();
-DetectionResult result = engine.process(chunk);
+- `onnxruntime-android` (1.20+)
+- Android 8.0+ (API 26+)
 
-if (result != null && result.probability > 0.5) {
-    Log.i("WakeWord", "检测到: " + result.wakeWord);
-}
-```
+## 注意
+
+`assets/` 下的 `.onnx` 和 `model_info.json` 仅本地测试用，**不要提交到 git**（已配 `.gitignore`）。

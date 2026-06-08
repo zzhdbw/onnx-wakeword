@@ -3,32 +3,33 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>轻量离线唤醒词演示 — 曼波 · 你好电脑 · 开始播放 · 来福</title>
+<title>Voicute 唤醒词演示</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0f0f1a; color: #e0e0e0;
+    font-size: 16px;
+    background: #1a1a2e; color: #e0e0e0;
     display: flex; justify-content: center; align-items: center;
     min-height: 100vh; padding: 16px;
   }
   .card {
     background: #1a1a2e; border-radius: 16px; padding: 24px;
-    max-width: 420px; width: 100%; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    max-width: 480px; width: 100%; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
   }
-  h1 { font-size: 20px; text-align: center; margin-bottom: 4px; }
-  .sub { text-align: center; color: #888; font-size: 12px; margin-bottom: 20px; }
+  h1 { font-size: 24px; text-align: center; margin-bottom: 4px; color: #e94560; }
+  .sub { text-align: center; color: #888; font-size: 14px; margin-bottom: 20px; }
   .status-bar {
     display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
     padding: 12px; border-radius: 10px; background: #16213e;
   }
-  .dot { width: 12px; height: 12px; border-radius: 50%; background: #555; flex-shrink: 0; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: #555; flex-shrink: 0; }
   .dot.listening { background: #16c79a; animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-  .status-text { flex: 1; font-size: 14px; }
+  .status-text { flex: 1; font-size: 15px; }
   .btn {
-    width: 100%; padding: 14px; border: none; border-radius: 10px;
-    font-size: 16px; font-weight: 600; cursor: pointer; transition: .2s;
+    width: 100%; padding: 16px; border: none; border-radius: 10px;
+    font-size: 17px; font-weight: 600; cursor: pointer; transition: .2s;
   }
   .btn-start { background: #16c79a; color: #000; }
   .btn-start:hover { background: #13b38a; }
@@ -41,10 +42,11 @@
     display: flex; align-items: center; justify-content: center;
     flex-direction: column; gap: 6px;
   }
-  .detect-word { font-size: 28px; font-weight: 700; color: #e94560; }
-  .detect-prob { font-size: 18px; color: #ffd93d; }
-  .detect-idle { color: #666; font-size: 14px; }
-  .log-box { margin-top: 12px; max-height: 180px; overflow-y: auto; font-size: 12px; }
+  .detect-word { font-size: 32px; font-weight: 700; color: #e94560; }
+  .detect-prob { font-size: 20px; color: #ffd93d; }
+  .detect-idle { color: #666; font-size: 15px; }
+  .detect-debug { font-size: 12px; color: #666; margin-top: 2px; }
+  .log-box { margin-top: 12px; max-height: 200px; overflow-y: auto; font-size: 13px; }
   .log-entry {
     display: flex; justify-content: space-between; padding: 6px 8px;
     border-bottom: 1px solid #222;
@@ -54,84 +56,145 @@
   .log-prob { color: #ffd93d; }
   .model-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
   .tag {
-    padding: 4px 10px; border-radius: 6px; font-size: 11px;
+    padding: 4px 10px; border-radius: 6px; font-size: 13px;
     background: #2a2a4a; color: #aaa;
   }
   .tag.active { background: #16c79a33; color: #16c79a; border: 1px solid #16c79a; }
+  .settings-box {
+    margin-top: 12px; padding: 10px; border-radius: 8px;
+    background: #0a0a1a; font-size: 14px;
+  }
+  .settings-box label { color: #888; }
+  .settings-box input[type=range] { width: 100%; margin: 4px 0; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>轻量离线唤醒词</h1>
-  <div class="sub">ONNX · <1MB · 浏览器本地推理 · 不上传音频</div>
+  <h1>Voicute 唤醒词</h1>
+  <div class="sub">端侧推理 · ONNX Runtime Web · 本地运行不联网</div>
 
-  <div class="model-tags" id="modelTags">
-    <span class="tag active" data-word="曼波">曼波</span>
-    <span class="tag active" data-word="你好电脑">你好电脑</span>
-    <span class="tag active" data-word="开始播放">开始播放</span>
-    <span class="tag active" data-word="来福">来福</span>
-  </div>
+  <div class="model-tags" id="modelTags"></div>
 
   <div class="status-bar">
     <div class="dot" id="statusDot"></div>
-    <span class="status-text" id="statusText">请通过 HTTP 服务打开此页面（不要双击打开）</span>
+    <span class="status-text" id="statusText">请通过 HTTP 服务打开此页面</span>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+    <label style="font-size:12px;color:#888;">阈值</label>
+    <input type="range" id="thresholdSlider" min="30" max="95" value="40" style="flex:1;">
+    <span id="thresholdVal" style="font-size:12px;color:#ffd93d;width:32px;">40%</span>
+  </div>
+
+  <div style="margin:20px 0;padding:12px 14px;border-radius:10px;background:#0a0a1a;border:1px solid #222;">
+    <div style="margin-bottom:2px;font-size:14px;color:#e0e0e0;font-weight:600;">防误唤醒设置</div>
+    <div style="margin-bottom:10px;font-size:11px;color:#ffd93d;">正式部署建议全部开启，测试时可单独关闭排查问题</div>
+    <div style="font-size:13px;color:#ccc;line-height:2.2;">
+      <div><label><input type="checkbox" id="l1Check" checked> L1 连续3帧</label> <span style="color:#888">解决键盘敲击、椅子响等瞬态短噪声误触发</span></div>
+      <div><label><input type="checkbox" id="l2Check"> L2 峰值/背景2x</label> <span style="color:#888">解决安静环境下模型对微弱底噪的幻觉误触发</span></div>
+      <div><label><input type="checkbox" id="l3Check"> L3 冷却1.5s</label> <span style="color:#888">解决一句话被重复识别多次的问题</span></div>
+      <div><label><input type="checkbox" id="l4Check"> L4 爆发封锁</label> <span style="color:#888">解决音频回路或连续噪声导致的密集误触发</span></div>
+      <div><label><input type="checkbox" id="l5Check"> L5 能量跳变</label> <span style="color:#888">解决视频/音乐等持续噪声</span>
+        <span style="margin-left:8px;color:#888;">倍数:</span>
+        <input type="range" id="l5Ratio" min="20" max="80" value="30" style="width:80px;vertical-align:middle;">
+        <span id="l5RatioVal" style="color:#ffd93d;font-size:12px;">3.0x</span>
+      </div>
+    </div>
   </div>
 
   <button class="btn btn-start" id="btnToggle" disabled>加载模型中...</button>
 
+  <button class="btn" id="btnClear" style="background:#444466;color:#fff;margin-top:4px;">清空记录</button>
+
   <div class="detect-box">
     <span class="detect-idle" id="detectDisplay">等待唤醒</span>
+    <div style="width:100%;height:6px;background:#333;border-radius:3px;margin-top:6px;">
+      <div id="confBar" style="width:0%;height:6px;background:#16c79a;border-radius:3px;transition:width 0.2s;"></div>
+    </div>
+    <span class="detect-debug" id="detectDebug"></span>
   </div>
 
   <div class="log-box" id="logBox"></div>
 </div>
 
+<div id="loadStatus" style="text-align:center;font-size:11px;color:#888;margin:4px 0;">等待脚本...</div>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
-<script src="wakeword.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script>
-// ---- State ----
-let detector = null;
-let gate = null;
+var s = document.getElementById('loadStatus');
+if (s) s.textContent = (typeof ort === 'undefined') ? 'ORT 加载失败!' : 'ORT OK';
+</script>
+<script src="wakeword.js?v=9"></script>
+<script>
+// ── Remote logging to PC ──
+window.remoteLog = function(msg) {
+  console.log(msg);
+  fetch('/log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({msg}) }).catch(()=>{});
+};
+
+// ── State ──
+let engine = null;
 let running = false;
 let logCount = 0;
-const COOLDOWN_MS = 3500;
-let lastTrigger = {};
-const MODEL_NAMES = ['曼波', '你好电脑', '开始播放', '来福'];
 
-// ---- UI refs ----
 const btnToggle = document.getElementById('btnToggle');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const detectDisplay = document.getElementById('detectDisplay');
+const detectDebug = document.getElementById('detectDebug');
 const logBox = document.getElementById('logBox');
+const modelTags = document.getElementById('modelTags');
+const thresholdSlider = document.getElementById('thresholdSlider');
+const thresholdVal = document.getElementById('thresholdVal');
 
-// ---- Init ----
+thresholdSlider.oninput = () => {
+  const v = thresholdSlider.value; thresholdVal.textContent = v + '%';
+  if (engine) engine.setThreshold(v / 100);
+};
+l1Check.onchange = () => { if (engine) engine.setL1(l1Check.checked); };
+l2Check.onchange = () => { if (engine) engine.setL2(l2Check.checked); };
+l3Check.onchange = () => { if (engine) engine.setL3(l3Check.checked); };
+l4Check.onchange = () => { if (engine) engine.setL4(l4Check.checked); };
+l5Check.onchange = () => { if (engine) engine.setL5(l5Check.checked); };
+l5Ratio.oninput = () => {
+  const v = l5Ratio.value / 10;
+  l5RatioVal.textContent = v.toFixed(1) + 'x';
+  if (engine) engine.setL5Ratio(v);
+};
+
 (async () => {
   try {
-    statusText.textContent = '正在加载 ONNX Runtime...';
-    detector = createDetector();
-    await detector.loadModels(
-      '../models/model_info.json',
-      '../models/melspectrogram.onnx',
-      '../models/embedding_model.onnx'
+    const logStatus = (msg) => {
+      statusText.textContent = msg;
+      document.getElementById('loadStatus').textContent = msg;
+      remoteLog(msg);
+    };
+    logStatus('ORT 就绪, 初始化...');
+    engine = VoicuteWakeWord.create();
+    logStatus('加载模型配置...');
+    await engine.load(
+      'https://voicute-1307385450.cos.ap-guangzhou.myqcloud.com/shared-models/manbo_basic_dcnn_v9.0.zip',
+      '../models/melspectrogram.onnx'
     );
-    gate = createConfidenceGate({ relativeRatio: 3.0, absoluteThreshold: 0.5, cooldownMs: 3500 });
+    const models = engine.getModels();
+    modelTags.innerHTML = models.map(m => `<span class="tag active">${m.name}</span>`).join('');
+    logStatus('模型加载完成: ' + models.map(m=>m.name).join(', '));
+
     btnToggle.disabled = false;
     btnToggle.textContent = '开始监听';
     btnToggle.className = 'btn btn-start';
-    statusText.textContent = '已加载 4 个唤醒词，点击开始';
+    document.getElementById('btnClear').onclick = () => { logBox.innerHTML = ''; logCount = 0; if (engine) engine.reset(); };
+    statusText.textContent = `已加载 ${models.length} 个唤醒词，点击开始`;
   } catch (e) {
     btnToggle.textContent = '加载失败';
-    statusText.textContent = '错误: ' + e.message;
+    statusText.textContent = '错误: ' + (e.message || e);
+    detectDisplay.innerHTML = '<span class="detect-idle" style="color:#e94560">' + (e.message || e) + '</span>';
     console.error(e);
   }
 })();
 
 btnToggle.addEventListener('click', async () => {
-  if (running) {
-    stop();
-    return;
-  }
+  if (running) { stop(); return; }
   await start();
 });
 
@@ -151,68 +214,50 @@ async function start() {
   btnToggle.className = 'btn btn-stop';
   statusDot.classList.add('listening');
   statusText.textContent = '正在监听...';
-
-  // Reset per-word cooldown
-  lastTrigger = {};
-  gate.reset();
-
-  let peakScore = 0;
-  let peakWord = '';
-  let peakTimer = null;
+  engine.reset();
 
   try {
-    await detector.startMic((score, allProbs) => {
-      // Find best word
-      let bestScore = 0, bestName = '';
-      if (allProbs) {
-        for (const name of MODEL_NAMES) {
-          if (allProbs[name] && allProbs[name] > bestScore) {
-            bestScore = allProbs[name];
-            bestName = name;
-          }
-        }
-      } else {
-        bestScore = score;
+    // DetectionLogic is now inside wakeword.js — callback receives the FINAL detected word
+    await engine.start((word, prob, info) => {
+      remoteLog(`DETECTED: ${word} ${(prob*100).toFixed(0)}% rms=${(info?.rms||0).toFixed(0)}`);
+      detectDisplay.innerHTML = `<span class="detect-word">${word}</span><span class="detect-prob">${(prob*100).toFixed(0)}%</span>`;
+      addLog(word, prob);
+
+      // Debug: show background & RMS (matches Android scoreText)
+      if (info) {
+        detectDebug.textContent = `bg:${(info.bg*100||0).toFixed(0)}% rms:${(info.rms||0).toFixed(0)}`;
       }
 
-      // Peak tracking over ~1.5s window
-      if (bestScore > peakScore) {
-        peakScore = bestScore;
-        peakWord = bestName;
-        clearTimeout(peakTimer);
-        peakTimer = setTimeout(() => {
-          const triggered = gate.onScore(peakScore);
-          if (triggered && peakWord) {
-            const now = Date.now();
-            if (!lastTrigger[peakWord] || (now - lastTrigger[peakWord]) > COOLDOWN_MS) {
-              lastTrigger[peakWord] = now;
-              detectDisplay.innerHTML = `<span class="detect-word">${peakWord}</span><span class="detect-prob">${(peakScore*100).toFixed(0)}%</span>`;
-              addLog(peakWord, peakScore);
-              setTimeout(() => {
-                detectDisplay.innerHTML = '<span class="detect-idle">等待唤醒</span>';
-              }, 2000);
-            }
-          }
-          peakScore = 0;
-          peakWord = '';
-        }, 1500);
-      }
+      document.getElementById('confBar').style.width = Math.min(100, prob * 100) + '%';
+      detectDisplay.style.background = '#16c79a33';
+      setTimeout(() => {
+        detectDisplay.innerHTML = '<span class="detect-idle">等待唤醒</span>';
+        detectDisplay.style.background = '#0f3460';
+        document.getElementById('confBar').style.width = '0%';
+        detectDebug.textContent = '';
+      }, 3000);
     });
   } catch (e) {
-    statusText.textContent = '麦克风错误: ' + e.message;
-    stop();
+    statusText.textContent = '麦克风错误: ' + (e.message || e);
+    detectDisplay.innerHTML = '<span class="detect-idle" style="color:#e94560">' + (e.message || e) + '</span>';
+    running = false;
+    btnToggle.textContent = '开始监听';
+    btnToggle.className = 'btn btn-start';
+    statusDot.classList.remove('listening');
   }
 }
 
 function stop() {
   running = false;
-  if (detector) detector.stopMic();
+  if (engine) engine.stop();
   btnToggle.textContent = '开始监听';
   btnToggle.className = 'btn btn-start';
   statusDot.classList.remove('listening');
   statusText.textContent = '已停止';
   detectDisplay.innerHTML = '<span class="detect-idle">等待唤醒</span>';
+  detectDebug.textContent = '';
 }
+
 </script>
 </body>
 </html>

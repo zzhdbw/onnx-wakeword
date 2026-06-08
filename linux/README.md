@@ -1,57 +1,58 @@
 # Linux / macOS / Windows 命令行推理
 
-Python 脚本，麦克风实时唤醒词检测。**支持 x86_64 和 32-bit ARM（树莓派）。**
+Python SDK，麦克风实时唤醒词检测。API 与 Web/Android 统一。
 
-## 架构选择
-
-| 平台 | 推理脚本 | 推理引擎 | 安装 |
-|------|----------|----------|------|
-| **x86_64 / 64-bit ARM** (Pi 4/5 64位) | `infer.py` | ONNX Runtime | `pip install onnxruntime` |
-| **32-bit ARM** (Pi 3B / Zero / Zero 2W) | `infer_tflite.py` | TFLite Runtime | `pip install tflite-runtime` |
-
-> **为什么 32 位用 TFLite？** ONNX Runtime 不提供 32 位 ARM (armv7l) 预编译包，源码编译复杂。TFLite Runtime 有官方 `linux_armv7l` wheel，一等公民支持。
-
-## 64 位系统
+## 安装
 
 ```bash
-pip install onnxruntime numpy sounddevice
-python linux/infer.py --model-dir ./models/
+pip install onnxruntime numpy pyaudio
 ```
+
+## 使用
+
+```python
+from wakeword_engine import WakeWordEngine
+
+engine = WakeWordEngine()
+engine.load('models/model_info.json', 'models/melspectrogram.onnx')
+
+# 配置检测层
+engine.set_L1(True)       # 连续帧过滤
+engine.set_L5(True)       # 能量跳变
+engine.set_L5_ratio(3.0)  # L5 倍数
+
+# 实时监听
+engine.start(lambda word, prob, info: print(f'检测到: {word} ({prob:.0%})'))
+```
+
+## 命令行 Demo
+
+```bash
+python wakeword_engine.py models/model_info.json models/melspectrogram.onnx
+```
+
+## API 完整对照
+
+| Web JS | Linux Python |
+|------|------|
+| `VoicuteWakeWord.create()` | `WakeWordEngine()` |
+| `engine.load(info, mel)` | `engine.load(info, mel)` |
+| `engine.start(cb)` | `engine.start(cb)` |
+| `engine.predict(audio)` | `engine.predict(audio)` |
+| `engine.set_L1(v)` | `engine.set_L1(v)` |
+| `engine.set_L5_ratio(v)` | `engine.set_L5_ratio(v)` |
+| `engine.stop()` | `engine.stop()` |
+
+## L1-L5 检测层
+
+| 层 | 默认 | 说明 |
+|:---:|:---:|------|
+| L1 | on / 3帧 | 连续帧过滤瞬态噪声 |
+| L2 | off | 峰值/背景比 |
+| L3 | off | 1.5s 冷却 |
+| L4 | off | 爆发封锁 |
+| L5 | off | 能量跳变（防视频/音乐） |
 
 ## 32 位树莓派
 
-### 1. 系统依赖
-
-```bash
-sudo apt install libportaudio2
-```
-
-### 2. Python 依赖
-
-```bash
-pip install tflite-runtime numpy sounddevice
-```
-
-### 3. 转换模型（在 x86_64 机器上做，树莓派编译 onnx2tf 困难）
-
-```bash
-pip install onnx2tf
-python linux/convert_to_tflite.py --model-dir ./models/
-```
-
-然后将 `models/` 目录下的 `.tflite` 文件复制到树莓派。
-
-### 4. 运行
-
-```bash
-python linux/infer_tflite.py --model-dir ./models/
-```
-
-## 参数
-
-| 参数 | 默认值 | 说明 |
-|------|:---:|------|
-| `--model-dir` | `../models/` | 模型目录路径 |
-| `--threshold` | `0.5` | 触发阈值 (0~1，softmax 概率) |
-| `--cooldown` | `3.5` | 冷却时间（秒） |
-| `--list-devices` | — | 列出可用麦克风设备 |
+32 位 ARM 用 TFLite 推理，见 `infer_tflite.py`。

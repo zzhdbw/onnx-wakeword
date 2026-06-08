@@ -4,10 +4,6 @@ import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
-import android.media.AudioFormat;
-import android.media.AudioRecord;
-import android.media.MediaRecorder;
-import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,6 +12,8 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -28,65 +26,55 @@ import androidx.core.content.ContextCompat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.BufferedWriter;
+import java.io.IOException;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements AudioCapture.Listener {
 
     private static final String TAG = "Voicute";
     private static final int PERM_REQ = 1001;
+    private static final long INFERENCE_INTERVAL_MS = 30;            // ~33 fps inference
+    private static final long CAPTURE_RESTART_IDLE_MS = 1_800_000;   // restart capture after 30min idle
+    private static final long MIN_RESTART_GAP_MS = 600_000;          // don't restart more than every 10min
+    private static final float RMS_GATE = 30f;                       // skip inference when near-silent (saves CPU)
 
-    private static final long DETECT_COOLDOWN_MS = 3500;
-    private static final long INFERENCE_INTERVAL_MS = 30;
-
-    private static final int THRESHOLD_OFFSET = 0;
-
-    private static final int CONF_HISTORY_SIZE = 128;
-    private final float[] confHistory = new float[CONF_HISTORY_SIZE];
-    private final String[] confHistoryWord = new String[CONF_HISTORY_SIZE];
-    private final long[] confHistoryTime = new long[CONF_HISTORY_SIZE];
-    private int confHistoryIdx = 0;
-    private static final long CONF_HISTORY_WINDOW_MS = 1500;
-
-
+    // --- Core components ---
     private WakeWordEngine engine;
-    private AudioRecord recorder;
-    private Thread captureThread;
+    private AudioCapture audioCapture;
+    private DetectionLogic detection;
+
+    // --- Threading ---
     private Thread inferThread;
     private Handler mainHandler;
+    private PowerManager.WakeLock wakeLock;
 
+    // --- State ---
     private volatile boolean running;
-    private volatile boolean captureAlive;
-    private volatile float latestScore;
-    private volatile float latestProb;
-    private volatile String latestWord = "";
+    private volatile float threshold = 0.50f;
     private volatile long lastInferMs;
-    private volatile float threshold = 0.60f;
-
-    private TextView statusText;
-    private TextView scoreText;
-    private TextView detectText;
-    private TextView counterText;
-    private TextView thresholdText;
-    private SeekBar thresholdSeekBar;
-    private Button toggleButton;
-    private Button clearButton;
-
-    private LinearLayout logContainer;
-    private ScrollView logScrollView;
-    private NoiseSuppressor noiseSuppressor;
-
-    private long lastDetectTime;
+    private long lastCaptureRestartMs;
     private long lastUiUpdate;
     private long lastDebugLog;
-    private long lastAudioActivityMs;
-    private int detectCount;
+    private float latestProb;
+    private String latestWord = "";
+
+    // --- UI ---
+    private TextView statusText, scoreText, detectText, counterText;
+    private TextView thresholdText;
+    private SeekBar thresholdSeekBar;
+    private CheckBox l5CheckBox;
+    private SeekBar l5RatioSeekBar;
+    private TextView l5RatioText;
+    private Button toggleButton;
+    private LinearLayout logContainer;
+    private ScrollView logScrollView;
+
+    // --- Logging ---
     private SimpleDateFormat timeFmt = new SimpleDateFormat("HH:mm:ss", Locale.US);
-
-    private PowerManager.WakeLock wakeLock;
-    private static final long CAPTURE_RESTART_IDLE_MS = 300_000;
-
-    private final int RING_SIZE = WakeWordEngine.SAMPLE_RATE * 3;
-    private short[] ringBuffer;
-    private volatile int ringPos;
+    private SimpleDateFormat fileTimeFmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+    private File detectionLogFile;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -99,77 +87,94 @@ public class MainActivity extends AppCompatActivity {
         counterText = findViewById(R.id.counterText);
         thresholdText = findViewById(R.id.thresholdText);
         thresholdSeekBar = findViewById(R.id.thresholdSeekBar);
+        l5CheckBox = findViewById(R.id.l5CheckBox);
+        l5RatioSeekBar = findViewById(R.id.l5RatioSeekBar);
+        l5RatioText = findViewById(R.id.l5RatioText);
         toggleButton = findViewById(R.id.toggleButton);
-        clearButton = findViewById(R.id.clearButton);
         logContainer = findViewById(R.id.logContainer);
         logScrollView = findViewById(R.id.logScrollView);
 
         mainHandler = new Handler(Looper.getMainLooper());
 
+        // Detection log file
+        detectionLogFile = new File(getExternalFilesDir(null), "detection_log.txt");
+        try {
+            if (!detectionLogFile.exists()) detectionLogFile.createNewFile();
+            FileWriter fw = new FileWriter(detectionLogFile, true);
+            fw.write("=== Session: " + fileTimeFmt.format(new Date()) + " ===\n");
+            fw.close();
+        } catch (IOException e) { Log.e(TAG, "Log file error", e); }
+
+        // Threshold slider
         thresholdSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                threshold = (THRESHOLD_OFFSET + progress) / 100.0f;
-                thresholdText.setText(String.format(Locale.US, "%d%%", THRESHOLD_OFFSET + progress));
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                threshold = p / 100.0f;
+                thresholdText.setText(String.format(Locale.US, "%d%%", p));
             }
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
         });
-        threshold = (THRESHOLD_OFFSET + thresholdSeekBar.getProgress()) / 100.0f;
-        thresholdText.setText(String.format(Locale.US, "%d%%",
-                THRESHOLD_OFFSET + thresholdSeekBar.getProgress()));
+        threshold = thresholdSeekBar.getProgress() / 100.0f;
+
+        // L5 toggle
+        l5CheckBox.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (detection != null) detection.l5Enabled = isChecked;
+        });
+
+        // L5 jump ratio slider: 2.0x ~ 5.0x (default 3.0x)
+        // Lower = easier to trigger (far-field), higher = stricter (close-range)
+        l5RatioSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                float ratio = 2.0f + p * 0.1f;  // 0-30 → 2.0-5.0
+                l5RatioText.setText(String.format(Locale.US, "%.1fx", ratio));
+                if (detection != null) detection.jumpRatio = ratio;
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+        // Init slider to default 3.0x (progress=10)
+        l5RatioSeekBar.setProgress(10);
 
         toggleButton.setOnClickListener(v -> {
-            if (running) {
-                stopListening();
-            } else {
-                startListening();
-            }
+            if (running) stopListening(); else startListening();
         });
 
-        clearButton.setOnClickListener(v -> clearLog());
+        findViewById(R.id.clearButton).setOnClickListener(v -> {
+            logContainer.removeAllViews();
+            detection.reset();
+            counterText.setText("");
+            detectText.setText("");
+        });
 
-        resetDisplay();
-
+        // Load models
         new Thread(() -> {
             engine = new WakeWordEngine(MainActivity.this);
+            audioCapture = new AudioCapture();
+            audioCapture.setListener(MainActivity.this);
+            detection = new DetectionLogic();
             runOnUiThread(() -> {
                 if (engine.isLoaded()) {
-                    String display = engine.getWakeWordDisplay();
-                    statusText.setText("已加载 " + engine.getModelCount() + " 个模型 - 点击开始");
-                    // Update the layout subtitle with actual wake words
-                    TextView subtitle = findViewById(R.id.wakeWordSubtitle);
-                    if (subtitle != null) {
-                        subtitle.setText("唤醒词: " + display);
-                    }
+                    statusText.setText("已加载 " + engine.getModelCount() + " 个模型");
+                    TextView sub = findViewById(R.id.wakeWordSubtitle);
+                    if (sub != null) sub.setText("唤醒词: " + engine.getWakeWordDisplay());
                     toggleButton.setEnabled(true);
                 } else {
                     String err = engine.getErrorMessage();
-                    statusText.setText(err != null ? "错误: " + err : "模型加载失败——请检查 assets 目录是否放入了模型文件");
+                    statusText.setText(err != null ? "错误: " + err : "模型加载失败");
                 }
             });
         }).start();
         toggleButton.setEnabled(false);
     }
 
-    private void resetDisplay() {
-        detectCount = 0;
-        lastDetectTime = 0;
-        lastUiUpdate = 0;
-        lastInferMs = 0;
-        detectText.setText("");
-        scoreText.setText("");
-        counterText.setText("");
+    @Override
+    public void onMicError(String msg) {
+        mainHandler.post(() -> statusText.setText(msg));
     }
 
-    private void clearLog() {
-        logContainer.removeAllViews();
-        detectCount = 0;
-        counterText.setText("");
-        detectText.setText("");
-    }
+    // ===================================================================
+    // Start / Stop
+    // ===================================================================
 
     private void startListening() {
         if (!hasPermission()) {
@@ -177,12 +182,16 @@ public class MainActivity extends AppCompatActivity {
                     new String[]{Manifest.permission.RECORD_AUDIO}, PERM_REQ);
             return;
         }
+        // Guard: don't start if already running
+        if (inferThread != null && inferThread.isAlive()) {
+            Log.w(TAG, "Inference thread already running — ignoring duplicate start");
+            return;
+        }
 
         running = true;
-        resetDisplay();
+        detection.reset();
         toggleButton.setText("停止");
-        String display = engine.getWakeWordDisplay();
-        statusText.setText("正在监听 \"" + display + "\"...");
+        statusText.setText("正在监听 \"" + engine.getWakeWordDisplay() + "\"...");
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
@@ -191,12 +200,7 @@ public class MainActivity extends AppCompatActivity {
             wakeLock.acquire();
         }
 
-        ringBuffer = new short[RING_SIZE];
-        ringPos = 0;
-
-        captureThread = new Thread(this::captureLoop, "AudioCapture");
-        captureThread.start();
-
+        audioCapture.start();
         inferThread = new Thread(this::inferenceLoop, "Inference");
         inferThread.start();
     }
@@ -212,147 +216,53 @@ public class MainActivity extends AppCompatActivity {
             wakeLock = null;
         }
 
-        for (Thread t : new Thread[]{captureThread, inferThread}) {
-            if (t != null) {
-                t.interrupt();
-                try { t.join(500); } catch (InterruptedException ignored) {}
-            }
+        if (inferThread != null) {
+            inferThread.interrupt();
+            try { inferThread.join(2000); } catch (InterruptedException ignored) {}
+            inferThread = null;
         }
-        captureThread = null;
-        inferThread = null;
+        if (audioCapture != null) audioCapture.stop();
+    }
 
-        if (noiseSuppressor != null) {
-            noiseSuppressor.setEnabled(false);
-            noiseSuppressor.release();
-            noiseSuppressor = null;
-        }
-        if (recorder != null) {
-            recorder.stop();
-            recorder.release();
-            recorder = null;
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        stopListening();
+        if (engine != null) {
+            new Thread(() -> engine.close()).start();
         }
     }
 
-    private void restartCapture() {
-        if (recorder != null) {
-            try { recorder.stop(); } catch (Exception ignored) {}
-            try { recorder.release(); } catch (Exception ignored) {}
-            recorder = null;
-        }
-        if (noiseSuppressor != null) {
-            try { noiseSuppressor.setEnabled(false); } catch (Exception ignored) {}
-            try { noiseSuppressor.release(); } catch (Exception ignored) {}
-            noiseSuppressor = null;
-        }
-        captureAlive = false;
-        captureThread = new Thread(this::captureLoop, "AudioCapture");
-        captureThread.start();
+    private boolean hasPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
     }
 
-    // --- Audio capture ---
-
-    private void captureLoop() {
-        try {
-            captureAlive = false;
-            int bufferSize = AudioRecord.getMinBufferSize(
-                    WakeWordEngine.SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT);
-            bufferSize = Math.max(bufferSize, engine.getAudioSamplesNeeded() * 2);
-
-            recorder = new AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    WakeWordEngine.SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize);
-
-            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
-                mainHandler.post(() -> statusText.setText("麦克风初始化失败"));
-                running = false;
-                return;
-            }
-
-            if (NoiseSuppressor.isAvailable()) {
-                noiseSuppressor = NoiseSuppressor.create(recorder.getAudioSessionId());
-                if (noiseSuppressor != null) noiseSuppressor.setEnabled(true);
-                Log.i(TAG, "NoiseSuppressor enabled: " + (noiseSuppressor != null));
-            }
-
-            recorder.startRecording();
-            captureAlive = true;
-
-            short[] readChunk = new short[WakeWordEngine.MEL_HOP_SAMPLES * 8];
-            long lastCaptureLog = 0;
-            long recordStartMs = System.currentTimeMillis();
-            float maxRmsSinceStart = 0;
-            int zeroReadCount = 0;
-            boolean micWarningShown = false;
-
-            while (running && !Thread.interrupted()) {
-                int read = recorder.read(readChunk, 0, readChunk.length);
-                if (read <= 0) {
-                    zeroReadCount++;
-                    if (zeroReadCount > 10 && !micWarningShown) {
-                        micWarningShown = true;
-                        Log.w(TAG, "AudioRecord.read returns 0 — mic likely occupied by another app");
-                        mainHandler.post(() -> statusText.setText("麦克风被占用，请关闭其他使用麦克风的应用"));
-                    }
-                    continue;
-                }
-                zeroReadCount = 0;
-
-                for (int i = 0; i < read; i++) {
-                    ringBuffer[ringPos] = readChunk[i];
-                    ringPos = (ringPos + 1) % RING_SIZE;
-                }
-
-                float rms = rmsOf(readChunk, read);
-                if (rms > maxRmsSinceStart) maxRmsSinceStart = rms;
-                if (rms > 200) {
-                    lastAudioActivityMs = System.currentTimeMillis();
-                }
-
-                // Mic occupancy check: after 3s, if RMS never exceeded 50, mic is likely locked
-                if (!micWarningShown && (System.currentTimeMillis() - recordStartMs) > 3000
-                        && maxRmsSinceStart < 50) {
-                    micWarningShown = true;
-                    Log.w(TAG, "Mic occupancy detected: max RMS=" + String.format(Locale.US, "%.1f", maxRmsSinceStart));
-                    mainHandler.post(() -> statusText.setText("麦克风被占用，请关闭其他使用麦克风的应用"));
-                }
-
-                long now = System.currentTimeMillis();
-                if (now - lastCaptureLog > 5000) {
-                    lastCaptureLog = now;
-                    Log.d(TAG, "Capture alive | ringPos=" + ringPos
-                            + " rms=" + String.format(Locale.US, "%.1f", rms));
-                }
-            }
-
-            recorder.stop();
-            recorder.release();
-            recorder = null;
-            captureAlive = false;
-        } catch (Exception e) {
-            Log.e(TAG, "Capture thread crashed", e);
-            captureAlive = false;
-            if (recorder != null) {
-                try { recorder.stop(); } catch (Exception ignored) {}
-                try { recorder.release(); } catch (Exception ignored) {}
-                recorder = null;
-            }
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] p, int[] results) {
+        super.onRequestPermissionsResult(requestCode, p, results);
+        if (requestCode == PERM_REQ && results.length > 0
+                && results[0] == PackageManager.PERMISSION_GRANTED) {
+            startListening();
         }
     }
 
-    private float rmsOf(short[] buf, int len) {
-        double sum = 0;
-        for (int i = 0; i < len; i++) sum += (double) buf[i] * buf[i];
-        return (float) Math.sqrt(sum / len);
-    }
+    // ===================================================================
+    // Inference loop
+    // ===================================================================
 
-    // --- Inference ---
-
+    /**
+     * Main inference loop. Runs at ~33fps on a dedicated thread.
+     *
+     * Pipeline: Audio ring buffer → RMS gate → ONNX inference →
+     *           DetectionLogic evaluation → UI update.
+     *
+     * The audio capture thread writes PCM into a lock-free ring buffer.
+     * This thread reads from it, decoupled so inference speed doesn't
+     * affect audio capture and vice versa.
+     */
     private void inferenceLoop() {
+        // Warm-up delay: wait for ring buffer to fill with audio
         try { Thread.sleep(500); } catch (InterruptedException e) { return; }
 
         long lastHeartbeat = 0;
@@ -360,33 +270,48 @@ public class MainActivity extends AppCompatActivity {
         while (running && !Thread.interrupted()) {
             long t0 = System.currentTimeMillis();
 
-            if (!captureAlive && running) {
-                Log.w(TAG, "Capture thread dead — restarting capture");
-                restartCapture();
-                try { Thread.sleep(800); } catch (InterruptedException e) { break; }
-                if (!captureAlive) {
-                    mainHandler.post(() -> statusText.setText("麦克风错误 - 请重启应用"));
-                    break;
+            // Watchdog: if capture thread crashed or was killed by OS,
+            // restart it (with minimum gap to avoid restart storms)
+            if (!audioCapture.isAlive() && running) {
+                Log.w(TAG, "Capture dead — restarting");
+                long now = System.currentTimeMillis();
+                if (now - lastCaptureRestartMs >= MIN_RESTART_GAP_MS) {
+                    lastCaptureRestartMs = now;
+                    audioCapture.restart();
+                    try { Thread.sleep(800); } catch (InterruptedException e) { break; }
+                    if (!audioCapture.isAlive()) {
+                        mainHandler.post(() -> statusText.setText("麦克风错误 - 请重启应用"));
+                        break;
+                    }
                 }
             }
 
-            if (running && captureAlive && lastAudioActivityMs > 0
-                    && (t0 - lastAudioActivityMs) > CAPTURE_RESTART_IDLE_MS
-                    && (t0 - lastDetectTime) > CAPTURE_RESTART_IDLE_MS) {
-                Log.w(TAG, "Audio idle 5min — restarting capture to wake hardware");
-                restartCapture();
-                lastAudioActivityMs = t0;
+            // Idle restart to prevent hardware sleep
+            long idleMs = audioCapture.getLastAudioActivityMs();
+            if (running && audioCapture.isAlive() && idleMs > 0
+                    && (t0 - idleMs) > CAPTURE_RESTART_IDLE_MS
+                    && (t0 - lastCaptureRestartMs) >= MIN_RESTART_GAP_MS) {
+                Log.w(TAG, "Audio idle 30min — restarting capture");
+                lastCaptureRestartMs = t0;
+                audioCapture.restart();
             }
 
-            int pos = ringPos;
+            // Read latest audio chunk from the ring buffer (lock-free)
+            int pos = audioCapture.getRingPos();
+            short[] audioChunk = audioCapture.readChunk(pos, engine.getAudioSamplesNeeded());
 
-            short[] audioChunk = new short[engine.getAudioSamplesNeeded()];
-            for (int i = 0; i < engine.getAudioSamplesNeeded(); i++) {
-                int idx = (pos - engine.getAudioSamplesNeeded() + i + RING_SIZE) % RING_SIZE;
-                audioChunk[i] = ringBuffer[idx];
+            // Compute RMS (root-mean-square) of the audio chunk.
+            // RMS ≈ perceived loudness: silent room ~20, normal speech ~500-2000.
+            float sumSq = 0;
+            for (short s : audioChunk) sumSq += (float) s * (float) s;
+            float chunkRms = (float) Math.sqrt(sumSq / audioChunk.length);
+
+            // Skip inference when quiet — saves CPU/battery, prevents noise from
+            // feeding the model (which would output random low probs and pollute bg)
+            WakeWordEngine.DetectionResult result = null;
+            if (chunkRms >= RMS_GATE) {
+                result = engine.process(audioChunk);
             }
-
-            WakeWordEngine.DetectionResult result = engine.process(audioChunk);
 
             long t1 = System.currentTimeMillis();
             lastInferMs = t1 - t0;
@@ -394,72 +319,63 @@ public class MainActivity extends AppCompatActivity {
             String word = "";
             float prob = 0;
             float bgProb = 0;
+            int modelConsFrames = 5;
             if (result != null) {
                 word = result.wakeWord != null ? result.wakeWord : "";
-                prob = result.probability;        // softmax probability of best word
-                bgProb = result.backgroundMean;   // softmax probability of background class
+                prob = result.probability;
+                bgProb = result.backgroundMean;
+                modelConsFrames = result.recommendedConsFrames;
             }
 
-            latestScore = prob;
             latestProb = prob;
             latestWord = word;
 
-            // Record in confidence history ring buffer
-            confHistory[confHistoryIdx] = prob;
-            confHistoryWord[confHistoryIdx] = word;
-            confHistoryTime[confHistoryIdx] = t1;
-            confHistoryIdx = (confHistoryIdx + 1) % CONF_HISTORY_SIZE;
-
-            // Find peak over recent window
-            float peakProb = 0;
-            String peakWord = "";
-            for (int i = 0; i < CONF_HISTORY_SIZE; i++) {
-                if (confHistoryTime[i] > 0 && (t1 - confHistoryTime[i]) < CONF_HISTORY_WINDOW_MS) {
-                    if (confHistory[i] > peakProb) {
-                        peakProb = confHistory[i];
-                        peakWord = confHistoryWord[i] != null ? confHistoryWord[i] : "";
-                    }
-                }
+            // DS-CNN per-frame debug (helps diagnose recognition issues)
+            if (engine.isDscnnMode() && prob > 0.05f) {
+                Log.d(TAG, String.format(Locale.US,
+                        "DS-CNN: word=%s prob=%.3f bg=%.3f", word, prob, bgProb));
             }
 
+            // Feed DetectionLogic (pass RMS for L5 pre-speech check)
+            detection.record(prob, word, chunkRms, t1);
+            String triggered = detection.evaluate(word, prob, chunkRms, threshold,
+                    modelConsFrames, 0, t1);
+
+            if (triggered != null) {
+                final String tw = triggered;
+                final float tp = detection.lastTrigProb;
+                final float tb = bgProb;
+                mainHandler.post(() -> showDetection(tw, tp, tb, chunkRms,
+                        detection.baseCons));
+            }
+
+            // Periodic debug (1s)
             if (t1 - lastDebugLog > 1000) {
                 lastDebugLog = t1;
-                float maxVal = 0, sumSq = 0;
-                for (short s : audioChunk) {
-                    float abs = Math.abs((float) s);
-                    if (abs > maxVal) maxVal = abs;
-                    sumSq += (float) s * (float) s;
-                }
-                float rms = (float) Math.sqrt(sumSq / audioChunk.length);
                 Log.d(TAG, String.format(Locale.US,
-                        "word=%s prob=%.1f%% peak=%.1f%% thr=%.0f%% bg=%.1f%% | infer=%dms pcm max=%.0f rms=%.1f capture=%b",
-                        peakWord, prob * 100, peakProb * 100, threshold * 100, bgProb * 100, lastInferMs, maxVal, rms, captureAlive));
+                        "word=%s prob=%.2f bg=%.4f peak=%.2f rms=%.0f preRms=%.0f cons=%d/%d L%d",
+                        latestWord.isEmpty() ? "-" : latestWord,
+                        latestProb, detection.dbgBg, detection.dbgPeak,
+                        chunkRms, detection.dbgPreRms,
+                        detection.consFrames, detection.baseCons, detection.dbgFail));
             }
 
+            // Heartbeat
             if (t1 - lastHeartbeat > 30000) {
                 lastHeartbeat = t1;
-                Log.i(TAG, "Inference alive | captureAlive=" + captureAlive
-                        + " ringPos=" + ringPos);
+                Log.i(TAG, "Inference alive | captureAlive=" + audioCapture.isAlive()
+                        + " ringPos=" + pos);
             }
 
-            // Detection: softmax probability > threshold + cooldown
-            if (peakProb > threshold && !peakWord.isEmpty()
-                    && (t1 - lastDetectTime) > DETECT_COOLDOWN_MS) {
-                lastDetectTime = t1;
-                detectCount++;
-                final float detectedProb = peakProb;
-                final String detectedWord = peakWord;
-                for (int i = 0; i < CONF_HISTORY_SIZE; i++) {
-                    confHistory[i] = 0;
-                    confHistoryWord[i] = "";
-                    confHistoryTime[i] = 0;
-                }
-                mainHandler.post(() -> showDetection(detectedWord, detectedProb));
-            }
-
+            // UI update
             if ((t1 - lastUiUpdate) > 400) {
                 lastUiUpdate = t1;
-                mainHandler.post(this::updateUI);
+                mainHandler.post(() -> {
+                    scoreText.setText(String.format(Locale.US,
+                            "word:%s prob:%.1f%% cons:%d/%d %dms",
+                            latestWord, latestProb * 100,
+                            detection.consFrames, detection.baseCons, lastInferMs));
+                });
             }
 
             long elapsed = System.currentTimeMillis() - t0;
@@ -470,14 +386,27 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // --- UI callbacks ---
+    // ===================================================================
+    // UI
+    // ===================================================================
 
-    private void showDetection(String word, float prob) {
-        detectText.setText(String.format(Locale.US,
-                "%s 检测到! (%.0f%%)", word, prob * 100));
+    private void showDetection(String word, float prob, float bg, float rms, int cons) {
+        detectText.setText(String.format(Locale.US, "%s 检测到! (%.0f%%)", word, prob * 100));
         detectText.setAlpha(1f);
-        counterText.setText(String.format(Locale.US, "已检测到 %d 次", detectCount));
+        counterText.setText(String.format(Locale.US, "已检测到 %d 次", detection.count));
         addLogEntry(word, prob);
+
+        // Persistent log
+        try {
+            FileWriter fw = new FileWriter(detectionLogFile, true);
+            BufferedWriter bw = new BufferedWriter(fw);
+            float maxVal = 0;
+            bw.write(String.format(Locale.US,
+                    "#%d  %s  word=%s  prob=%.1f%%  bg=%.1f%%  rms=%.0f  cons=%d\n",
+                    detection.count, fileTimeFmt.format(new Date()),
+                    word, prob * 100, bg * 100, rms, cons));
+            bw.close();
+        } catch (IOException e) { Log.e(TAG, "Log write error", e); }
 
         mainHandler.postDelayed(() -> {
             detectText.animate().alpha(0f).setDuration(400).start();
@@ -486,14 +415,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void addLogEntry(String word, float prob) {
         String now = timeFmt.format(new Date());
+        int count = detection.count;
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(8, 6, 8, 6);
-        row.setBackgroundColor(detectCount % 2 == 0 ? 0xFF1a1a2e : 0xFF16213e);
+        row.setBackgroundColor(count % 2 == 0 ? 0xFF1a1a2e : 0xFF16213e);
 
         TextView idxView = new TextView(this);
-        idxView.setText(String.format(Locale.US, "#%d", detectCount));
+        idxView.setText(String.format(Locale.US, "#%d", count));
         idxView.setTextSize(11);
         idxView.setTextColor(0xFF888888);
         idxView.setWidth(60);
@@ -504,9 +434,8 @@ public class MainActivity extends AppCompatActivity {
         msgView.setTextSize(12);
         msgView.setTextColor(0xFFe94560);
         msgView.setTypeface(null, Typeface.BOLD);
-        LinearLayout.LayoutParams msgParams = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        msgView.setLayoutParams(msgParams);
+        msgView.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(msgView);
 
         TextView timeView = new TextView(this);
@@ -527,47 +456,9 @@ public class MainActivity extends AppCompatActivity {
         row.addView(probView);
 
         logContainer.addView(row, 0);
-
         if (logContainer.getChildCount() > 50) {
             logContainer.removeViewAt(logContainer.getChildCount() - 1);
         }
-
         logScrollView.post(() -> logScrollView.fullScroll(ScrollView.FOCUS_UP));
-    }
-
-    private void updateUI() {
-        float peak = 0;
-        long now = System.currentTimeMillis();
-        for (int i = 0; i < CONF_HISTORY_SIZE; i++) {
-            if (confHistoryTime[i] > 0 && (now - confHistoryTime[i]) < CONF_HISTORY_WINDOW_MS) {
-                if (confHistory[i] > peak) peak = confHistory[i];
-            }
-        }
-        scoreText.setText(String.format(Locale.US,
-                "word:%s prob:%.1f%% peak:%.0f%% %dms",
-                latestWord, latestProb * 100, peak * 100, lastInferMs));
-    }
-
-    private boolean hasPermission() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED;
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] perms, int[] results) {
-        super.onRequestPermissionsResult(requestCode, perms, results);
-        if (requestCode == PERM_REQ && results.length > 0
-                && results[0] == PackageManager.PERMISSION_GRANTED) {
-            startListening();
-        }
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        stopListening();
-        if (engine != null) {
-            new Thread(() -> engine.close()).start();
-        }
     }
 }
