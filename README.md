@@ -1,12 +1,18 @@
-# 轻量离线关键词识别 / 唤醒词识别 / KWS
+# Lightweight Offline Wake Word / Keyword Spotting
 
-> 关键词识别、唤醒词识别、离线语音识别、Keyword Spotting、Wake Word、KWS、ONNX、TFLite、ESP32
+> **Offline · Model < 130KB · No cloud · No audio upload · ESP32/Android/Linux/Web**
 
-**Offline · < 1MB · < 10ms inference · No cloud · No data upload** | [中文说明](README_ZH.md)
+[中文说明](README_ZH.md)
 
-ONNX is a universal model format. Grab the mel + embedding + classifier ONNX files and run wake word detection on **any device** with ONNX Runtime — Android, Linux, Web. TFLite for ESP32. No internet, no cloud dependency.
+Plug in ONNX models and run wake word detection on any device with ONNX Runtime. No internet, no cloud dependency.
 
-Use cases: smart home voice control, AI toys, PTT radio voice activation, desktop assistants, ESP32 offline voice modules.
+Use cases: smart home voice control, AI toys, desktop assistants, ESP32 offline voice modules.
+
+## Web Demo
+
+![Screenshot](web/screenshot.png)
+
+Built-in anti-false-trigger panel with 5-layer detection toggles, L5 ratio slider, threshold control, and confidence bar.
 
 ## Get ONNX Models
 
@@ -14,120 +20,115 @@ Use cases: smart home voice control, AI toys, PTT radio voice activation, deskto
 
 All of these can export ONNX wake word models:
 
-- [OpenWakeWord](https://github.com/dscripka/openWakeWord) — open source, home automation optimized, multi-wake-word
-- [NanoWakeWord](https://github.com/arcosoph/nanowakeword) — open source, 11 architectures (DNN/TCN/Conformer), tiny (40KB)
-- [Porcupine](https://github.com/Picovoice/porcupine) — commercial, high accuracy
+- [OpenWakeWord](https://github.com/dscripka/openWakeWord) — open source, home automation, multi-wake-word
 - [MicroWakeWord](https://github.com/kahrendt/microWakeWord) — designed for ESP32, TinyML
-- [TensorFlow KWS](https://www.tensorflow.org/tutorials/audio/simple_audio) — Google tutorial, research-friendly
+- [NanoWakeWord](https://github.com/arcosoph/nanowakeword) — 11 architectures, tiny (40KB)
 - Any KWS framework that exports ONNX
 
-### Don't want to train?
+### Quick start (no training)
 
-[voicute.com](https://www.voicute.com) — type a keyword, get an ONNX model. First one free.
+[voicute.com](https://www.voicute.com) — enter a wake word, get an ONNX model. First one free.
 
-## ONNX Model Files
-
-Three files needed regardless of training tool:
+## Required Files
 
 | File | Description |
 |------|-------------|
-| `melspectrogram.onnx` | Audio → mel spectrogram. Shared across all wake words. **Included in this repo.** |
-| `embedding_model.onnx` | Mel spectrogram → features. Shared across all wake words. **Included in this repo.** |
-| `your_model.onnx` | Features → wake word probability. One per word. From voicute.com or your own training. |
-
-> melspectrogram and embedding are universal modules. You only need to swap the classifier ONNX to change wake words.
-
-**Using TFLite?** ONNX → TFLite via [onnx2tf](https://github.com/PINTO0309/onnx2tf) for ESP32 and TFLite Micro devices. See [`esp32/`](esp32/).
+| `melspectrogram.onnx` | Audio → Mel spectrogram (shared). **Provided in `models/`** |
+| `your_model.onnx` | Wake word detection. Get from training or online service |
 
 Plus a `model_info.json` config file.
 
-Multi-class models (one ONNX for multiple wake words) output N+1 softmax probabilities.
-
 ## Model Config
 
-### Single wake word
 ```json
 {
-  "wake_word": "hello computer",
-  "model_file": "hello_computer.onnx",
-  "emb_frames": 16,
-  "threshold": 0.5
-}
-```
-
-### Multiple wake words
-```json
-{
+  "model_type": "dscnn",
+  "mel_time": 98,
   "multi_model": true,
   "models": [
-    { "wake_word": "turn on lights", "model_file": "lights.onnx", "emb_frames": 16 },
-    { "wake_word": "hello computer", "model_file": "computer.onnx", "emb_frames": 16 }
+    {"wake_word": "曼波", "model_file": "dscnn_multiscale_manbo.onnx", "cons_frames": 3}
   ]
 }
 ```
 
-### Multi-class model (single ONNX, multiple words)
-```json
-{
-  "model_type": "multi",
-  "wake_words": ["punch in", "start break"],
-  "model_file": "multi.onnx",
-  "emb_frames": 16,
-  "n_classes": 3
-}
-```
-
-## Inference Pipeline
+## Project Structure
 
 ```
-Audio(16kHz) → MelSpectrogram → Embedding → Classifier(s) → Softmax → Wake Word
+onnx-wakeword/
+├── android/     # Android (Java, ONNX Runtime)
+├── web/         # Web (JavaScript, ONNX Runtime Web)
+├── linux/       # Linux / Raspberry Pi (Python)
+├── esp32/       # ESP32-S3/P4
+└── models/      # Shared mel model + demo wake word models
 ```
 
-Single model: classifier outputs sigmoid probability.
-Multi-model: each classifier sigmoid → logit → +background class → softmax → argmax.
+## Platform Quick Start
 
-## Platform Support
-
-| Directory | Platform | Status |
-|-----------|----------|:------:|
-| [`android/`](android/) | Android (Java) | ✅ |
-| [`web/`](web/) | Web (JavaScript) | ✅ |
-| [`linux/`](linux/) | Linux x86_64 / arm64 (Python, ONNX) | ✅ |
-| [`linux/`](linux/) | Raspberry Pi 32-bit (Python, TFLite) | ✅ |
-| [`esp32/`](esp32/) | ESP32-S3/P4 | 🚧 TFLite |
-
-### Android
-
-Place models in `assets/`, depends on `onnxruntime-android`. See [`WakeWordEngine.java`](android/app/src/main/java/com/voicute/wakeword/WakeWordEngine.java).
-
-```java
-WakeWordEngine engine = new WakeWordEngine(context);
-DetectionResult result = engine.process(audioChunk);
-// result.wakeWord, result.probability
-```
+| Platform | Directory | Entry Point |
+|----------|-----------|-------------|
+| Android | `android/` | `WakeWordEngine.java` |
+| Web | `web/` | `wakeword.js` → `VoicuteWakeWord.create()` |
+| Linux | `linux/` | `wakeword_engine.py` → `WakeWordEngine()` |
 
 ### Web
 
-双击项目根目录的 `run.bat`，浏览器打开 `http://localhost:8080/web/`。
-
-或手动：`python -m http.server 8080`，无需复制模型文件。
+```html
+<script src="wakeword.js"></script>
+<script>
+  const engine = VoicuteWakeWord.create();
+  await engine.load('model_info.json', 'melspectrogram.onnx');
+  // Supports local paths, URLs, and COS ZIP packages
+  engine.set_L1(true);
+  await engine.start((word, prob) => {
+    console.log(`Detected: ${word} (${(prob*100).toFixed(0)}%)`);
+  });
+</script>
+```
 
 ### Linux
 
 ```bash
-pip install onnxruntime numpy sounddevice
-python linux/infer.py --model-dir ./models/
+pip install onnxruntime numpy pyaudio
 ```
 
-## Included Demo Models
+```python
+from wakeword_engine import WakeWordEngine
+engine = WakeWordEngine()
+engine.load('model_info.json', 'melspectrogram.onnx')
+engine.set_L1(True)
+engine.start(lambda word, prob, info: print(f'{word}'))
+```
 
-`models/` contains 4 Chinese demo wake words from [voicute.com](https://www.voicute.com):
+### Android
 
-| Wake Word | Model File |
-|-----------|-----------|
-| 曼波 | `manbo_v8_wakeword.onnx` |
-| 你好电脑 | `nihaodiannao_v8_wakeword.onnx` |
-| 开始播放 | `kaishibofang_v8_wakeword.onnx` |
-| 来福 | `laifu_v8_wakeword.onnx` |
+Copy models to `assets/`, build with Android Studio.
 
-Configured as multi-model — test multi-word detection out of the box.
+```java
+WakeWordEngine engine = new WakeWordEngine(context);
+DetectionResult result = engine.process(audioChunk);
+```
+
+## Anti-False-Trigger Layers
+
+5 configurable layers. Enable all for production:
+
+| Layer | Default | What it prevents |
+|:---:|:---:|------|
+| L1 Consecutive | on / 2~3 frames | Keyboard clicks, chair creaks (transient noise) |
+| L2 Peak/BG | off | Model hallucination on quiet background |
+| L3 Cooldown | off | Duplicate triggers from a single utterance |
+| L4 Burst | off | Dense false triggers from audio feedback loops |
+| L5 Energy Jump | off | Video playback, background music |
+
+L5 ratio: adjustable 2.0-8.0x (default 3.0) via `engine.set_L5_ratio(v)`.
+
+## Version History
+
+**v9.0 (2026-06)**
+- End-to-end inference architecture, ~128KB models
+- Web/Linux/Android unified SDK API
+- L1-L5 five-layer detection pipeline, individually toggleable
+- L5 energy jump detection (curRms/preMin), blocks video/music false triggers
+- COS ZIP direct loading
+- Quiet-room guard (preMin<50 && rms<80)
+- Auto cons_frames (2-char=2, 3+char=3)
