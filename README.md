@@ -5,6 +5,8 @@
 
 > **离线运行 · 模型 < 130KB · 不上传音频 · ESP32/Android/Linux/Web 全平台**
 
+[:us: English](README_EN.md) | 🚧 English wake word support is under development — [learn more](README_EN.md#-english-wake-word-support--coming-soon)
+
 本仓库提供各平台的开源唤醒词/关键词识别推理代码。支持自定义唤醒词，拿到 ONNX 模型就能在 Android、Web、Linux、ESP32 上跑离线语音识别和语音唤醒，不依赖云端。
 
 ## Web Demo
